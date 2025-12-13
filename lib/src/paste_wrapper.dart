@@ -103,8 +103,8 @@ class _PasteWrapperState extends State<PasteWrapper> {
   late final int _viewId;
 
   /// Whether the native platform handles paste interception directly.
-  /// iOS uses method swizzling to intercept paste at the UIKit level.
-  bool get _nativeHandlesPaste => Platform.isIOS;
+  /// iOS and macOS use method swizzling to intercept paste at the UI level.
+  bool get _nativeHandlesPaste => Platform.isIOS || Platform.isMacOS;
 
   @override
   void initState() {
