@@ -99,4 +99,16 @@ class PasteChannel {
   Future<void> unregisterView(int viewId) async {
     await _methodChannel.invokeMethod<void>('unregisterView', {'viewId': viewId});
   }
+
+  /// Triggers a clipboard check on the native side.
+  ///
+  /// This is used on platforms where the native side cannot automatically
+  /// detect paste events (e.g., Android). The native side will read the
+  /// clipboard and send an event if content is found.
+  ///
+  /// This is called internally by [PasteWrapper] when it intercepts
+  /// a paste action from the Flutter framework.
+  Future<void> checkClipboard() async {
+    await _methodChannel.invokeMethod<void>('checkClipboard');
+  }
 }

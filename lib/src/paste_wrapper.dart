@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -41,7 +42,7 @@ import 'paste_payload.dart';
 /// ## Platform Support
 ///
 /// - **iOS**: Uses method swizzling on UITextField/UITextView
-/// - **Android**: Uses OnReceiveContentListener (API 31+) or ActionMode.Callback
+/// - **Android**: Intercepts paste via clipboard monitoring
 /// - **macOS**: Uses NSPasteboard with NSTextField swizzling
 /// - **Linux**: Uses GTK clipboard API
 /// - **Windows**: Uses Win32 clipboard API
@@ -101,6 +102,10 @@ class _PasteWrapperState extends State<PasteWrapper> {
   static int _nextViewId = 0;
   late final int _viewId;
 
+  /// Whether the native platform handles paste interception directly.
+  /// iOS uses method swizzling to intercept paste at the UIKit level.
+  bool get _nativeHandlesPaste => Platform.isIOS;
+
   @override
   void initState() {
     super.initState();
@@ -138,6 +143,13 @@ class _PasteWrapperState extends State<PasteWrapper> {
     widget.onPaste(payload);
   }
 
+  /// Called when a paste action is detected on non-iOS platforms.
+  /// This triggers the native side to check the clipboard.
+  void _onPasteAction() {
+    if (!widget.enabled) return;
+    PasteChannel.instance.checkClipboard();
+  }
+
   @override
   void didUpdateWidget(PasteWrapper oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -166,7 +178,38 @@ class _PasteWrapperState extends State<PasteWrapper> {
 
   @override
   Widget build(BuildContext context) {
-    // The wrapper is transparent and doesn't affect the child's layout
-    return widget.child;
+    // On iOS, the native side handles paste interception via swizzling.
+    // On other platforms, we intercept paste actions here.
+    if (_nativeHandlesPaste || !widget.enabled) {
+      return widget.child;
+    }
+
+    // Wrap with Actions to intercept paste intent
+    return Actions(
+      actions: <Type, Action<Intent>>{
+        PasteTextIntent: _PasteInterceptAction(_onPasteAction),
+      },
+      child: widget.child,
+    );
   }
+}
+
+/// Custom action that intercepts paste and calls a callback.
+class _PasteInterceptAction extends Action<PasteTextIntent> {
+  _PasteInterceptAction(this.onPaste);
+
+  final VoidCallback onPaste;
+
+  @override
+  Object? invoke(PasteTextIntent intent) {
+    // Notify our handler about the paste
+    onPaste();
+
+    // Return null to let the default paste behavior continue
+    // (text will be pasted normally, and we get notified via the event channel)
+    return null;
+  }
+
+  @override
+  bool consumesKey(PasteTextIntent intent) => false;
 }
