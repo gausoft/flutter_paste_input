@@ -2,8 +2,9 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
-import 'paste_channel.dart';
 import 'paste_payload.dart';
 
 /// A widget that wraps a [TextField] or [TextFormField] to intercept paste events.
@@ -41,11 +42,8 @@ import 'paste_payload.dart';
 ///
 /// ## Platform Support
 ///
-/// - **iOS**: Uses method swizzling on UITextField/UITextView
-/// - **Android**: Intercepts paste via clipboard monitoring
-/// - **macOS**: Uses NSPasteboard with NSTextField swizzling
-/// - **Linux**: Uses GTK clipboard API
-/// - **Windows**: Uses Win32 clipboard API
+/// - **iOS/Android**: Uses Flutter's ContentInsertionConfiguration
+/// - **macOS/Linux/Windows**: Uses clipboard monitoring
 class PasteWrapper extends StatefulWidget {
   /// Creates a [PasteWrapper] widget.
   ///
@@ -98,115 +96,294 @@ class PasteWrapper extends StatefulWidget {
 }
 
 class _PasteWrapperState extends State<PasteWrapper> {
-  StreamSubscription<PastePayload>? _subscription;
-  static int _nextViewId = 0;
-  late final int _viewId;
-
-  /// Whether the native platform handles paste interception directly.
-  /// iOS and macOS use method swizzling to intercept paste at the UI level.
-  bool get _nativeHandlesPaste => Platform.isIOS || Platform.isMacOS;
+  bool get _useContentInsertion => Platform.isIOS || Platform.isAndroid;
 
   @override
-  void initState() {
-    super.initState();
-    _viewId = _nextViewId++;
-    _initializePasteListener();
-  }
-
-  void _initializePasteListener() {
-    if (!widget.enabled) return;
-
-    // Initialize the channel if not already done
-    PasteChannel.instance.initialize();
-
-    // Register this view
-    PasteChannel.instance.registerView(_viewId);
-
-    // Subscribe to paste events
-    _subscription = PasteChannel.instance.onPaste.listen(_handlePaste);
-  }
-
-  void _handlePaste(PastePayload payload) {
-    if (!widget.enabled) return;
-
-    // Filter by accepted types if specified
-    if (widget.acceptedTypes != null) {
-      final isAccepted = switch (payload) {
-        TextPaste() => widget.acceptedTypes!.contains(PasteType.text),
-        ImagePaste() => widget.acceptedTypes!.contains(PasteType.image),
-        UnsupportedPaste() => false,
-      };
-
-      if (!isAccepted) return;
+  Widget build(BuildContext context) {
+    if (!widget.enabled) {
+      return widget.child;
     }
 
-    widget.onPaste(payload);
+    // On iOS/Android, use ContentInsertionConfiguration
+    if (_useContentInsertion) {
+      return _buildWithContentInsertion();
+    }
+
+    // On desktop platforms, use clipboard monitoring
+    return _buildWithClipboardMonitoring();
   }
 
-  /// Called when a paste action is detected on non-iOS platforms.
-  /// This triggers the native side to check the clipboard.
-  void _onPasteAction() {
-    if (!widget.enabled) return;
-    PasteChannel.instance.checkClipboard();
+  Widget _buildWithContentInsertion() {
+    // Extract TextField from child
+    final child = widget.child;
+
+    if (child is TextField) {
+      return TextField(
+        controller: child.controller,
+        focusNode: child.focusNode,
+        decoration: child.decoration,
+        keyboardType: child.keyboardType,
+        textInputAction: child.textInputAction,
+        textCapitalization: child.textCapitalization,
+        style: child.style,
+        strutStyle: child.strutStyle,
+        textAlign: child.textAlign,
+        textAlignVertical: child.textAlignVertical,
+        textDirection: child.textDirection,
+        readOnly: child.readOnly,
+        showCursor: child.showCursor,
+        autofocus: child.autofocus,
+        obscuringCharacter: child.obscuringCharacter,
+        obscureText: child.obscureText,
+        autocorrect: child.autocorrect,
+        smartDashesType: child.smartDashesType,
+        smartQuotesType: child.smartQuotesType,
+        enableSuggestions: child.enableSuggestions,
+        maxLines: child.maxLines,
+        minLines: child.minLines,
+        expands: child.expands,
+        maxLength: child.maxLength,
+        onChanged: child.onChanged,
+        onEditingComplete: child.onEditingComplete,
+        onSubmitted: child.onSubmitted,
+        onAppPrivateCommand: child.onAppPrivateCommand,
+        inputFormatters: child.inputFormatters,
+        enabled: child.enabled,
+        cursorWidth: child.cursorWidth,
+        cursorHeight: child.cursorHeight,
+        cursorRadius: child.cursorRadius,
+        cursorOpacityAnimates: child.cursorOpacityAnimates,
+        cursorColor: child.cursorColor,
+        selectionHeightStyle: child.selectionHeightStyle,
+        selectionWidthStyle: child.selectionWidthStyle,
+        keyboardAppearance: child.keyboardAppearance,
+        scrollPadding: child.scrollPadding,
+        dragStartBehavior: child.dragStartBehavior,
+        enableInteractiveSelection: child.enableInteractiveSelection,
+        selectionControls: child.selectionControls,
+        onTap: child.onTap,
+        onTapOutside: child.onTapOutside,
+        mouseCursor: child.mouseCursor,
+        buildCounter: child.buildCounter,
+        scrollController: child.scrollController,
+        scrollPhysics: child.scrollPhysics,
+        autofillHints: child.autofillHints,
+        clipBehavior: child.clipBehavior,
+        restorationId: child.restorationId,
+        scribbleEnabled: child.scribbleEnabled,
+        enableIMEPersonalizedLearning: child.enableIMEPersonalizedLearning,
+        contextMenuBuilder: _buildContextMenu,
+        canRequestFocus: child.canRequestFocus,
+        spellCheckConfiguration: child.spellCheckConfiguration,
+        magnifierConfiguration: child.magnifierConfiguration,
+        contentInsertionConfiguration: ContentInsertionConfiguration(
+          onContentInserted: _onContentInserted,
+          allowedMimeTypes: const [
+            'image/png',
+            'image/jpeg',
+            'image/gif',
+            'image/webp',
+          ],
+        ),
+      );
+    }
+
+    // If not a TextField, wrap with Actions for clipboard monitoring
+    return _buildWithClipboardMonitoring();
   }
 
-  @override
-  void didUpdateWidget(PasteWrapper oldWidget) {
-    super.didUpdateWidget(oldWidget);
+  Widget _buildContextMenu(
+    BuildContext context,
+    EditableTextState editableTextState,
+  ) {
+    final List<ContextMenuButtonItem> buttonItems = List.from(
+      editableTextState.contextMenuButtonItems,
+    );
 
-    // Handle enabled state changes
-    if (widget.enabled != oldWidget.enabled) {
-      if (widget.enabled) {
-        _initializePasteListener();
-      } else {
-        _disposePasteListener();
+    // Remove the default Paste button and replace with our custom one
+    buttonItems.removeWhere((item) => item.type == ContextMenuButtonType.paste);
+
+    // Add our custom "Paste" button that handles both text and images
+    buttonItems.insert(
+      0,
+      ContextMenuButtonItem(
+        label: 'Paste',
+        onPressed: () async {
+          ContextMenuController.removeAny();
+          await _checkAndPasteFromClipboard();
+        },
+      ),
+    );
+
+    return AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: editableTextState.contextMenuAnchors,
+      buttonItems: buttonItems,
+    );
+  }
+
+  Future<void> _checkAndPasteFromClipboard() async {
+    if (Platform.isIOS || Platform.isAndroid) {
+      // On mobile, try to read images from clipboard using platform channel
+      try {
+        final result = await MethodChannel(
+          'dev.gausoft/flutter_paste_input/methods',
+        ).invokeMethod('getClipboardImage');
+
+        if (result != null && result is Map) {
+          final imagesList = result['images'] as List?;
+
+          if (imagesList != null && imagesList.isNotEmpty) {
+            final List<String> uris = [];
+            final List<String> mimeTypes = [];
+
+            final tempDir = await getTemporaryDirectory();
+
+            for (var imageData in imagesList) {
+              if (imageData is Map) {
+                final data = imageData['data'] as Uint8List?;
+                final mimeType = imageData['mimeType'] as String?;
+
+                if (data != null && mimeType != null) {
+                  final extension = _getExtensionFromMimeType(mimeType);
+                  final fileName =
+                      'paste_${DateTime.now().millisecondsSinceEpoch}_${uris.length}.$extension';
+                  final file = File('${tempDir.path}/$fileName');
+
+                  await file.writeAsBytes(data);
+                  uris.add(file.path);
+                  mimeTypes.add(mimeType);
+                }
+              }
+            }
+
+            if (uris.isNotEmpty) {
+              _notifyImagePaste(uris, mimeTypes);
+            }
+          }
+        }
+      } catch (e) {
+        print('FlutterPasteInput: Error reading clipboard image: $e');
       }
     }
   }
 
-  void _disposePasteListener() {
-    _subscription?.cancel();
-    _subscription = null;
-    PasteChannel.instance.unregisterView(_viewId);
-  }
-
-  @override
-  void dispose() {
-    _disposePasteListener();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // On iOS, the native side handles paste interception via swizzling.
-    // On other platforms, we intercept paste actions here.
-    if (_nativeHandlesPaste || !widget.enabled) {
-      return widget.child;
-    }
-
-    // Wrap with Actions to intercept paste intent
+  Widget _buildWithClipboardMonitoring() {
     return Actions(
       actions: <Type, Action<Intent>>{
-        PasteTextIntent: _PasteInterceptAction(_onPasteAction),
+        PasteTextIntent: _PasteInterceptAction(_onClipboardPaste),
       },
       child: widget.child,
     );
   }
+
+  Future<void> _onContentInserted(KeyboardInsertedContent content) async {
+    if (!widget.enabled) return;
+
+    // Check if it's an image
+    if (content.mimeType.startsWith('image/')) {
+      await _handleImageContent(content);
+    } else if (content.mimeType == 'text/plain') {
+      await _handleTextContent(content);
+    } else {
+      _notifyUnsupported();
+    }
+  }
+
+  Future<void> _handleImageContent(KeyboardInsertedContent content) async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final extension = _getExtensionFromMimeType(content.mimeType);
+      final fileName =
+          'paste_${DateTime.now().millisecondsSinceEpoch}.$extension';
+      final file = File('${tempDir.path}/$fileName');
+
+      if (content.data != null) {
+        await file.writeAsBytes(content.data!);
+        _notifyImagePaste([file.path], [content.mimeType]);
+      } else {
+        // Copy from URI if available
+        final sourceFile = File(content.uri);
+        if (await sourceFile.exists()) {
+          await sourceFile.copy(file.path);
+          _notifyImagePaste([file.path], [content.mimeType]);
+        }
+      }
+    } catch (e) {
+      print('FlutterPasteInput: Error handling image content: $e');
+      _notifyUnsupported();
+    }
+  }
+
+  Future<void> _handleTextContent(KeyboardInsertedContent content) async {
+    if (content.data != null) {
+      final text = String.fromCharCodes(content.data!);
+      _notifyTextPaste(text);
+    } else {
+      _notifyUnsupported();
+    }
+  }
+
+  Future<void> _onClipboardPaste() async {
+    if (!widget.enabled) return;
+
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      if (data?.text != null) {
+        _notifyTextPaste(data!.text!);
+      } else {
+        _notifyUnsupported();
+      }
+    } catch (e) {
+      print('FlutterPasteInput: Error reading clipboard: $e');
+      _notifyUnsupported();
+    }
+  }
+
+  void _notifyTextPaste(String text) {
+    if (widget.acceptedTypes != null &&
+        !widget.acceptedTypes!.contains(PasteType.text)) {
+      return;
+    }
+    widget.onPaste(TextPaste(text: text));
+  }
+
+  void _notifyImagePaste(List<String> uris, List<String> mimeTypes) {
+    if (widget.acceptedTypes != null &&
+        !widget.acceptedTypes!.contains(PasteType.image)) {
+      return;
+    }
+    widget.onPaste(ImagePaste(uris: uris, mimeTypes: mimeTypes));
+  }
+
+  void _notifyUnsupported() {
+    widget.onPaste(const UnsupportedPaste());
+  }
+
+  String _getExtensionFromMimeType(String mimeType) {
+    switch (mimeType) {
+      case 'image/png':
+        return 'png';
+      case 'image/jpeg':
+      case 'image/jpg':
+        return 'jpg';
+      case 'image/gif':
+        return 'gif';
+      case 'image/webp':
+        return 'webp';
+      default:
+        return 'png';
+    }
+  }
 }
 
-/// Custom action that intercepts paste and calls a callback.
 class _PasteInterceptAction extends Action<PasteTextIntent> {
   _PasteInterceptAction(this.onPaste);
 
-  final VoidCallback onPaste;
+  final Future<void> Function() onPaste;
 
   @override
   Object? invoke(PasteTextIntent intent) {
-    // Notify our handler about the paste
     onPaste();
-
-    // Return null to let the default paste behavior continue
-    // (text will be pasted normally, and we get notified via the event channel)
     return null;
   }
 

@@ -13,167 +13,237 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Paste Input Demo',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
-      home: const PasteInputDemo(),
+      title: 'Paste Input Demo',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.light(useMaterial3: true),
+      darkTheme: ThemeData.dark(useMaterial3: true),
+      home: const ChatInputDemo(),
     );
   }
 }
 
-class PasteInputDemo extends StatefulWidget {
-  const PasteInputDemo({super.key});
+class ChatInputDemo extends StatefulWidget {
+  const ChatInputDemo({super.key});
 
   @override
-  State<PasteInputDemo> createState() => _PasteInputDemoState();
+  State<ChatInputDemo> createState() => _ChatInputDemoState();
 }
 
-class _PasteInputDemoState extends State<PasteInputDemo> {
+class _ChatInputDemoState extends State<ChatInputDemo> {
   final TextEditingController _controller = TextEditingController();
   final List<String> _pastedImagePaths = [];
-  String _lastPasteInfo = 'No paste detected yet';
 
   void _handlePaste(PastePayload payload) {
     setState(() {
       switch (payload) {
-        case TextPaste(:final text):
-          _lastPasteInfo = 'Pasted text: "${text.length > 50 ? '${text.substring(0, 50)}...' : text}"';
-        case ImagePaste(:final uris, :final mimeTypes):
-          _lastPasteInfo = 'Pasted ${uris.length} image(s): ${mimeTypes.join(', ')}';
+        case TextPaste():
+          // Le texte est automatiquement inséré dans le TextField
+          break;
+        case ImagePaste(:final uris):
           _pastedImagePaths.addAll(uris);
         case UnsupportedPaste():
-          _lastPasteInfo = 'Unsupported paste content';
+          break;
       }
     });
   }
 
-  void _clearImages() {
+  void _removeImage(int index) {
+    setState(() {
+      _pastedImagePaths.removeAt(index);
+    });
+  }
+
+  void _sendMessage() {
+    final text = _controller.text.trim();
+    final hasImages = _pastedImagePaths.isNotEmpty;
+
+    if (text.isEmpty && !hasImages) return;
+
+    // Simuler l'envoi
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          hasImages
+              ? 'Sent: "$text" with ${_pastedImagePaths.length} image(s)'
+              : 'Sent: "$text"',
+        ),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+
+    // Reset
+    _controller.clear();
     setState(() {
       _pastedImagePaths.clear();
     });
-    PasteChannel.instance.clearTempFiles();
   }
 
   @override
   void dispose() {
     _controller.dispose();
+    PasteChannel.instance.clearTempFiles();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Paste Input Demo'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        actions: [
-          if (_pastedImagePaths.isNotEmpty)
-            IconButton(
-              icon: const Icon(Icons.delete_outline),
-              onPressed: _clearImages,
-              tooltip: 'Clear images',
-            ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+    return GestureDetector(
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: Scaffold(
+        body: Column(
           children: [
-            // Status
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  _lastPasteInfo,
-                  style: Theme.of(context).textTheme.bodyMedium,
+            // Espace vide
+            const Expanded(child: SizedBox()),
+
+            // Zone de saisie style message
+            _buildMessageInput(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMessageInput() {
+    final colorScheme = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Champ de saisie avec images
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? const Color(0xFF2C2C2E)
+                      : const Color(0xFFEFEFEF),
+                  borderRadius: BorderRadius.circular(24),
                 ),
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // Pasted images preview
-            if (_pastedImagePaths.isNotEmpty) ...[
-              Text(
-                'Pasted Images:',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 100,
-                child: ListView.builder(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _pastedImagePaths.length,
-                  itemBuilder: (context, index) {
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: Image.file(
-                          File(_pastedImagePaths[index]),
-                          height: 100,
-                          width: 100,
-                          fit: BoxFit.cover,
-                          errorBuilder: (context, error, stackTrace) {
-                            return Container(
-                              height: 100,
-                              width: 100,
-                              color: Colors.grey[300],
-                              child: const Icon(Icons.error),
-                            );
-                          },
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 16),
-            ],
-
-            // Text input with paste wrapper
-            const Text('Paste text or images here:'),
-            const SizedBox(height: 8),
-            PasteWrapper(
-              onPaste: _handlePaste,
-              child: TextField(
-                controller: _controller,
-                decoration: const InputDecoration(
-                  hintText: 'Type or paste content here...',
-                  border: OutlineInputBorder(),
-                ),
-                maxLines: 3,
-              ),
-            ),
-
-            const Spacer(),
-
-            // Instructions
-            Card(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              child: const Padding(
-                padding: EdgeInsets.all(12),
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'How to test:',
-                      style: TextStyle(fontWeight: FontWeight.bold),
+                    // Images collées
+                    if (_pastedImagePaths.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: List.generate(
+                            _pastedImagePaths.length,
+                            (index) => _buildImagePreview(index),
+                          ),
+                        ),
+                      ),
+
+                    // TextField
+                    PasteWrapper(
+                      onPaste: _handlePaste,
+                      child: TextField(
+                        controller: _controller,
+                        decoration: InputDecoration(
+                          hintText: 'Type a message',
+                          hintStyle: TextStyle(
+                            color: isDark ? Colors.grey[500] : Colors.grey[600],
+                          ),
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                        ),
+                        maxLines: 5,
+                        minLines: 1,
+                        textCapitalization: TextCapitalization.sentences,
+                      ),
                     ),
-                    SizedBox(height: 8),
-                    Text('1. Copy an image or text to your clipboard'),
-                    Text('2. Tap on the text field above'),
-                    Text('3. Use the paste action (long press → Paste)'),
-                    Text('4. Watch the status update above!'),
                   ],
+                ),
+              ),
+            ),
+
+            const SizedBox(width: 10),
+
+            // Bouton envoyer
+            GestureDetector(
+              onTap: _sendMessage,
+              child: Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? const Color(0xFF3A3A3C)
+                      : const Color(0xFF3C3C3C),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.arrow_forward,
+                  color: Colors.white,
+                  size: 22,
                 ),
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildImagePreview(int index) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.file(
+            File(_pastedImagePaths[index]),
+            width: 80,
+            height: 80,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) {
+              final colorScheme = Theme.of(context).colorScheme;
+              return Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: colorScheme.errorContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(
+                  Icons.broken_image,
+                  color: colorScheme.onErrorContainer,
+                ),
+              );
+            },
+          ),
+        ),
+        // Bouton X pour supprimer
+        Positioned(
+          top: -6,
+          right: -6,
+          child: GestureDetector(
+            onTap: () => _removeImage(index),
+            child: Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.close,
+                size: 14,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

@@ -26,7 +26,7 @@ sealed class PastePayload {
 
     switch (type) {
       case 'text':
-        return TextPaste(map['value'] as String? ?? '');
+        return TextPaste(text: map['value'] as String? ?? '');
       case 'images':
         final uris = (map['uris'] as List<dynamic>?)
                 ?.map((e) => e.toString())
@@ -48,7 +48,7 @@ sealed class PastePayload {
 /// The [text] field contains the plain text that was pasted.
 final class TextPaste extends PastePayload {
   /// Creates a [TextPaste] with the given text content.
-  const TextPaste(this.text);
+  const TextPaste({required this.text});
 
   /// The pasted text content.
   final String text;
