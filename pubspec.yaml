@@ -1,6 +1,6 @@
 name: flutter_paste_input
 description: A Flutter plugin for intercepting paste events in TextFields, supporting text and image content across all platforms.
-version: 0.1.0
+version: 1.0.0
 homepage: https://github.com/gausoft/flutter_paste_input
 repository: https://github.com/gausoft/flutter_paste_input
 issue_tracker: https://github.com/gausoft/flutter_paste_input/issues

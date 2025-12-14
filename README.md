@@ -9,22 +9,20 @@ A Flutter plugin for intercepting paste events in TextFields, supporting both te
 
 ## Features
 
-- Intercept paste events before content reaches the TextField
-- Support for text and image paste content
-- Works with PNG, JPEG, GIF, and other image formats
-- Cross-platform support: iOS, Android, macOS, Linux, and Windows
-- Type-safe API using Dart 3 sealed classes
-- Easy integration with existing TextFields
+- Detect when users paste content into a TextField
+- Support for text and images (PNG, JPEG, GIF, WebP)
+- Cross-platform: iOS, Android, macOS, Linux, and Windows
+- Simple API with a single wrapper widget
 
 ## Platform Support
 
-| Platform | Support | Notes |
-|----------|---------|-------|
-| iOS      | ✅       | Uses method swizzling on UITextField/UITextView |
-| Android  | ✅       | Uses clipboard monitoring with Actions interception |
-| macOS    | ✅       | Uses method swizzling on NSTextField/NSTextView |
-| Linux    | ✅       | Uses GTK clipboard API |
-| Windows  | ✅       | Uses Win32 clipboard API with GDI+ |
+| Platform | Support |
+|----------|---------|
+| iOS      | ✅       |
+| Android  | ✅       |
+| macOS    | ✅       |
+| Linux    | ✅       |
+| Windows  | ✅       |
 
 ## Installation
 
@@ -32,12 +30,10 @@ Add this to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  flutter_paste_input: ^0.1.0
+  flutter_paste_input: ^1.0.0
 ```
 
-## Usage
-
-### Basic Usage
+## Quick Start
 
 Wrap your TextField with `PasteWrapper`:
 
@@ -49,14 +45,15 @@ PasteWrapper(
     switch (payload) {
       case TextPaste(:final text):
         print('Pasted text: $text');
-      case ImagePaste(:final uris, :final mimeTypes):
-        print('Pasted ${uris.length} image(s)');
-        // uris contains temporary file paths
-        for (int i = 0; i < uris.length; i++) {
-          print('Image ${i + 1}: ${uris[i]} (${mimeTypes[i]})');
+      case RawImagePaste(:final items):
+        for (final item in items) {
+          print('Pasted image: ${item.mimeType}');
+          // item.data contains the image bytes (Uint8List)
         }
+      case ImagePaste(:final uris):
+        print('Pasted images: $uris');
       case UnsupportedPaste():
-        print('Unsupported paste content');
+        print('Unsupported content');
     }
   },
   child: TextField(
@@ -65,117 +62,163 @@ PasteWrapper(
 )
 ```
 
-### Filter Paste Types
+## Usage
 
-Accept only specific content types:
+### Handle Pasted Images
+
+By default, images are returned as raw bytes:
+
+```dart
+case RawImagePaste(:final items):
+  for (final item in items) {
+    // Display directly
+    Image.memory(item.data);
+
+    // Or save to file
+    final file = File('path/to/image.png');
+    await file.writeAsBytes(item.data);
+  }
+```
+
+### Save Images to Files Automatically
+
+If you prefer file paths:
 
 ```dart
 PasteWrapper(
-  acceptedTypes: {PasteType.image}, // Only accept images
+  saveImagesToTempFiles: true,
   onPaste: (payload) {
-    // Only ImagePaste will be received
+    if (payload case ImagePaste(:final uris)) {
+      for (final path in uris) {
+        Image.file(File(path));
+      }
+    }
   },
   child: TextField(),
 )
 ```
 
-### Enable/Disable Dynamically
+### Filter Paste Types
+
+Accept only images or only text:
 
 ```dart
 PasteWrapper(
-  enabled: _isPasteEnabled,
-  onPaste: _handlePaste,
+  acceptedTypes: {PasteType.image}, // Only images
+  onPaste: (payload) { ... },
   child: TextField(),
 )
 ```
 
-### Handle Images
-
-When images are pasted, they are saved as temporary files:
+### Enable/Disable
 
 ```dart
-case ImagePaste(:final uris, :final mimeTypes):
-  for (int i = 0; i < uris.length; i++) {
-    final file = File(uris[i]);
-    final mimeType = mimeTypes[i];
-
-    // Copy to permanent location if needed
-    await file.copy('/path/to/permanent/location.png');
-
-    // Or display directly
-    Image.file(file);
-  }
+PasteWrapper(
+  enabled: _isPasteEnabled,
+  onPaste: (payload) { ... },
+  child: TextField(),
+)
 ```
 
-### Clear Temporary Files
-
-Temporary files can be cleaned up manually:
+### Clean Up Temporary Files
 
 ```dart
 await PasteChannel.instance.clearTempFiles();
+```
+
+## Complete Example
+
+```dart
+class ChatInput extends StatefulWidget {
+  @override
+  State<ChatInput> createState() => _ChatInputState();
+}
+
+class _ChatInputState extends State<ChatInput> {
+  final _controller = TextEditingController();
+  final List<Uint8List> _images = [];
+
+  void _handlePaste(PastePayload payload) {
+    if (payload case RawImagePaste(:final items)) {
+      setState(() {
+        _images.addAll(items.map((e) => e.data));
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        // Image previews
+        Wrap(
+          children: _images.map((bytes) =>
+            Image.memory(bytes, width: 80, height: 80, fit: BoxFit.cover),
+          ).toList(),
+        ),
+
+        // Input
+        PasteWrapper(
+          onPaste: _handlePaste,
+          child: TextField(controller: _controller),
+        ),
+      ],
+    );
+  }
+}
 ```
 
 ## API Reference
 
 ### PasteWrapper
 
-The main widget for intercepting paste events.
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `child` | `Widget` | required | The TextField to wrap |
+| `onPaste` | `Function(PastePayload)` | required | Called when paste is detected |
+| `acceptedTypes` | `Set<PasteType>?` | `null` | Filter: `{PasteType.text}`, `{PasteType.image}`, or both |
+| `enabled` | `bool` | `true` | Enable/disable detection |
+| `saveImagesToTempFiles` | `bool` | `false` | Return file paths instead of raw bytes |
+
+### PastePayload Types
+
+| Type | Description | Properties |
+|------|-------------|------------|
+| `TextPaste` | Plain text | `text: String` |
+| `RawImagePaste` | Images as bytes | `items: List<RawClipboardItem>` |
+| `ImagePaste` | Images as file paths | `uris: List<String>`, `mimeTypes: List<String>` |
+| `UnsupportedPaste` | Unknown content | - |
+
+### RawClipboardItem
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `child` | `Widget` | The widget to wrap (typically TextField) |
-| `onPaste` | `void Function(PastePayload)` | Callback when paste is detected |
-| `acceptedTypes` | `Set<PasteType>?` | Filter for accepted content types |
-| `enabled` | `bool` | Enable/disable paste detection |
+| `data` | `Uint8List` | Image bytes |
+| `mimeType` | `String` | e.g., `'image/png'` |
+| `isGif` | `bool` | True if GIF |
 
-### PastePayload
+## Roadmap
 
-Sealed class representing paste content:
+Upcoming features for future releases:
 
-- `TextPaste` - Plain text with `text` property
-- `ImagePaste` - Images with `uris` and `mimeTypes` lists
-- `UnsupportedPaste` - Unsupported content type
+- [ ] **Web platform support** - Clipboard API integration for browsers
+- [ ] **File paste support** - PDF, documents, and other file types
+- [ ] **Drag and drop** - Unified behavior with paste
+- [ ] **Preview before insert** - Optional confirmation dialog
+- [ ] **Size limits** - `maxImageSize` and `maxFileSize` options
+- [ ] **Paste callbacks** - `onPasteStart`, `onPasteAccept`, `onPasteReject`
 
-### ImagePaste
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `uris` | `List<String>` | File paths to temporary images |
-| `mimeTypes` | `List<String>` | MIME types (e.g., 'image/png') |
-| `hasGif` | `bool` | True if paste contains animated GIFs |
-| `count` | `int` | Number of images |
-
-### PasteType
-
-Enum for filtering:
-
-- `PasteType.text`
-- `PasteType.image`
-
-## How It Works
-
-### iOS & macOS
-
-Uses Objective-C runtime method swizzling to intercept the `paste:` method on text input controls. When paste is detected, the clipboard content is processed and sent to Flutter via EventChannel.
-
-### Android
-
-Uses Flutter's Actions system to intercept `PasteTextIntent`. When detected, the native plugin reads the clipboard content including images and sends events to Flutter.
-
-### Linux
-
-Uses GTK's `GtkClipboard` API to read clipboard content, supporting both images and text.
-
-### Windows
-
-Uses Win32 Clipboard API with GDI+ for image processing. Supports bitmap data, text, and file drops.
+Have a feature request? [Open an issue](https://github.com/gausoft/flutter_paste_input/issues)!
 
 ## Limitations
 
-- Images are saved as temporary files; copy them to a permanent location if persistence is needed
-- Rich text (formatted HTML, etc.) is not currently supported
-- On some platforms, the original paste action continues after interception (text will still be pasted)
+- Rich text (HTML, RTF) is not supported
+- Web platform is not yet supported
+
+## Acknowledgments
+
+This package was inspired by [this post on X](https://x.com/i/status/1997738168247062774).
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License - see [LICENSE](LICENSE) file.
