@@ -50,6 +50,7 @@
 /// ```
 library;
 
-export 'src/paste_payload.dart' show PastePayload, TextPaste, ImagePaste, UnsupportedPaste, PasteType;
+export 'src/paste_payload.dart' show PastePayload, TextPaste, ImagePaste, UnsupportedPaste, PasteType, RawImagePaste, RawClipboardItem;
 export 'src/paste_wrapper.dart' show PasteWrapper;
 export 'src/paste_channel.dart' show PasteChannel;
+export 'src/generated/messages.g.dart' show ClipboardContent, ClipboardItem;

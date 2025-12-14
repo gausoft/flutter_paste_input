@@ -1,41 +1,45 @@
 import 'dart:async';
+import 'dart:convert';
 
-import 'package:flutter/services.dart';
-
+import 'generated/messages.g.dart';
 import 'paste_payload.dart';
+
+/// Implementation of [PasteInputFlutterApi] to receive paste events from native.
+class _PasteInputFlutterApiImpl implements PasteInputFlutterApi {
+  _PasteInputFlutterApiImpl(this._onPaste);
+
+  final void Function(ClipboardContent content) _onPaste;
+
+  @override
+  void onPasteDetected(ClipboardContent content) {
+    _onPaste(content);
+  }
+}
 
 /// Handles communication with the native platform for paste events.
 ///
-/// This class manages both the [MethodChannel] for method calls and
-/// the [EventChannel] for receiving paste events from native code.
+/// This class uses Pigeon-generated type-safe APIs for communication
+/// with native code across all platforms.
 class PasteChannel {
-  PasteChannel._();
+  PasteChannel._() {
+    _hostApi = PasteInputHostApi();
+  }
 
   static final PasteChannel _instance = PasteChannel._();
 
   /// The singleton instance of [PasteChannel].
   static PasteChannel get instance => _instance;
 
-  /// The method channel for calling native methods.
-  static const MethodChannel _methodChannel = MethodChannel(
-    'dev.gausoft/flutter_paste_input/methods',
-  );
-
-  /// The event channel for receiving paste events.
-  static const EventChannel _eventChannel = EventChannel(
-    'dev.gausoft/flutter_paste_input/events',
-  );
-
-  StreamSubscription<dynamic>? _subscription;
+  late final PasteInputHostApi _hostApi;
   final _pasteController = StreamController<PastePayload>.broadcast();
+
+  bool _isInitialized = false;
 
   /// Stream of paste events from the native platform.
   ///
   /// Subscribe to this stream to receive [PastePayload] objects whenever
   /// the user pastes content into a wrapped text field.
   Stream<PastePayload> get onPaste => _pasteController.stream;
-
-  bool _isInitialized = false;
 
   /// Initializes the paste event listener.
   ///
@@ -45,18 +49,9 @@ class PasteChannel {
     if (_isInitialized) return;
     _isInitialized = true;
 
-    _subscription = _eventChannel.receiveBroadcastStream().listen(
-      (dynamic event) {
-        if (event is Map) {
-          final payload = PastePayload.fromMap(Map<String, dynamic>.from(event));
-          _pasteController.add(payload);
-        }
-      },
-      onError: (dynamic error) {
-        // Log error but don't crash
-        // ignore: avoid_print
-        print('PasteChannel error: $error');
-      },
+    // Set up the Flutter API to receive callbacks from native
+    PasteInputFlutterApi.setUp(
+      _PasteInputFlutterApiImpl(_handlePasteFromNative),
     );
   }
 
@@ -64,17 +59,57 @@ class PasteChannel {
   ///
   /// Call this when the plugin is no longer needed.
   void dispose() {
-    _subscription?.cancel();
-    _subscription = null;
     _isInitialized = false;
+    PasteInputFlutterApi.setUp(null);
   }
+
+  /// Handles paste events received from native code via Pigeon.
+  void _handlePasteFromNative(ClipboardContent content) {
+    final payload = _convertToPayload(content);
+    _pasteController.add(payload);
+  }
+
+  /// Converts [ClipboardContent] from Pigeon to [PastePayload].
+  PastePayload _convertToPayload(ClipboardContent content) {
+    if (content.items.isEmpty) {
+      return const UnsupportedPaste();
+    }
+
+    // Check for images first (priority to images)
+    final imageItems = content.items.where((item) => _isImage(item.mimeType)).toList();
+    if (imageItems.isNotEmpty) {
+      return RawImagePaste(
+        items: imageItems.map((item) => RawClipboardItem(
+          data: item.data,
+          mimeType: item.mimeType,
+        )).toList(),
+      );
+    }
+
+    // Check for text
+    final textItems = content.items.where((item) => _isText(item.mimeType)).toList();
+    if (textItems.isNotEmpty) {
+      // Decode the first text item as UTF-8
+      final textData = textItems.first.data;
+      final text = utf8.decode(textData);
+      return TextPaste(text: text);
+    }
+
+    return const UnsupportedPaste();
+  }
+
+  bool _isImage(String mimeType) => mimeType.startsWith('image/');
+  bool _isText(String mimeType) => mimeType.startsWith('text/');
 
   /// Returns the current platform version.
   ///
   /// This is mainly for debugging purposes.
   Future<String?> getPlatformVersion() async {
-    final version = await _methodChannel.invokeMethod<String>('getPlatformVersion');
-    return version;
+    try {
+      return await _hostApi.getPlatformVersion();
+    } catch (e) {
+      return null;
+    }
   }
 
   /// Clears temporary image files created by paste operations.
@@ -83,32 +118,24 @@ class PasteChannel {
   /// pasted images in the app's cache directory, and they are not
   /// automatically deleted.
   Future<void> clearTempFiles() async {
-    await _methodChannel.invokeMethod<void>('clearTempFiles');
+    await _hostApi.clearTempFiles();
   }
 
-  /// Notifies the native side that a view is ready to receive paste events.
+  /// Gets the current clipboard content.
   ///
-  /// This is called internally by [PasteWrapper].
-  Future<void> registerView(int viewId) async {
-    await _methodChannel.invokeMethod<void>('registerView', {'viewId': viewId});
+  /// Returns a [ClipboardContent] containing all available items.
+  /// Use this to manually check clipboard content.
+  Future<ClipboardContent> getClipboardContent() async {
+    return await _hostApi.getClipboardContent();
   }
 
-  /// Notifies the native side that a view is no longer listening for paste events.
+  /// Gets the clipboard content and converts it to a [PastePayload].
   ///
-  /// This is called internally by [PasteWrapper].
-  Future<void> unregisterView(int viewId) async {
-    await _methodChannel.invokeMethod<void>('unregisterView', {'viewId': viewId});
-  }
-
-  /// Triggers a clipboard check on the native side.
-  ///
-  /// This is used on platforms where the native side cannot automatically
-  /// detect paste events (e.g., Android). The native side will read the
-  /// clipboard and send an event if content is found.
-  ///
-  /// This is called internally by [PasteWrapper] when it intercepts
-  /// a paste action from the Flutter framework.
-  Future<void> checkClipboard() async {
-    await _methodChannel.invokeMethod<void>('checkClipboard');
+  /// This is useful for handling paste events manually, for example
+  /// when intercepting paste actions from the Flutter framework.
+  Future<PastePayload> getPastePayload() async {
+    final content = await getClipboardContent();
+    return _convertToPayload(content);
   }
 }
+

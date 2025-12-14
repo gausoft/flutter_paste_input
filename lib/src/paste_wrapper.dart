@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'paste_channel.dart';
 import 'paste_payload.dart';
 
 /// A widget that wraps a [TextField] or [TextFormField] to intercept paste events.
@@ -23,6 +24,11 @@ import 'paste_payload.dart';
 ///       case ImagePaste(:final uris):
 ///         print('Pasted ${uris.length} images');
 ///         // uris contains file paths to temporary images
+///       case RawImagePaste(:final items):
+///         // Handle raw image data directly
+///         for (final item in items) {
+///           print('Image: ${item.mimeType}, ${item.data.length} bytes');
+///         }
 ///       case UnsupportedPaste():
 ///         print('Unsupported paste content');
 ///     }
@@ -34,16 +40,16 @@ import 'paste_payload.dart';
 /// )
 /// ```
 ///
-/// ## Image URIs
+/// ## Image Handling
 ///
-/// When images are pasted, the [ImagePaste.uris] field contains file paths
-/// to temporary files in the app's cache directory. If you need to persist
-/// these images, copy them to a permanent location.
+/// When images are pasted, you receive either:
+/// - [RawImagePaste] with raw binary data (allowing you to process it yourself)
+/// - [ImagePaste] with file URIs (for backward compatibility)
 ///
 /// ## Platform Support
 ///
 /// - **iOS/Android**: Uses Flutter's ContentInsertionConfiguration
-/// - **macOS/Linux/Windows**: Uses clipboard monitoring
+/// - **macOS/Linux/Windows**: Uses clipboard monitoring via Pigeon
 class PasteWrapper extends StatefulWidget {
   /// Creates a [PasteWrapper] widget.
   ///
@@ -57,6 +63,7 @@ class PasteWrapper extends StatefulWidget {
     required this.onPaste,
     this.acceptedTypes,
     this.enabled = true,
+    this.saveImagesToTempFiles = false,
   });
 
   /// The child widget, typically a [TextField] or [TextFormField].
@@ -66,7 +73,8 @@ class PasteWrapper extends StatefulWidget {
   ///
   /// The callback receives a [PastePayload] which can be:
   /// - [TextPaste] for plain text
-  /// - [ImagePaste] for images (with file URIs)
+  /// - [RawImagePaste] for images with raw data
+  /// - [ImagePaste] for images with file URIs (when [saveImagesToTempFiles] is true)
   /// - [UnsupportedPaste] for unsupported content types
   final void Function(PastePayload payload) onPaste;
 
@@ -90,6 +98,13 @@ class PasteWrapper extends StatefulWidget {
   /// When false, the widget acts as a transparent wrapper and
   /// [onPaste] is never called.
   final bool enabled;
+
+  /// Whether to save images to temporary files instead of passing raw data.
+  ///
+  /// When true, [ImagePaste] with file URIs is returned instead of [RawImagePaste].
+  /// This is useful for backward compatibility or when working with APIs that
+  /// require file paths.
+  final bool saveImagesToTempFiles;
 
   @override
   State<PasteWrapper> createState() => _PasteWrapperState();
@@ -233,77 +248,61 @@ class _PasteWrapperState extends State<PasteWrapper> {
   Future<void> _checkAndPasteFromClipboard(
     EditableTextState editableTextState,
   ) async {
-    if (Platform.isIOS || Platform.isAndroid) {
-      try {
-        // Use getClipboardContent to get both text and images in one call
-        final result = await MethodChannel(
-          'dev.gausoft/flutter_paste_input/methods',
-        ).invokeMethod('getClipboardContent');
+    try {
+      // Use the Pigeon-based API
+      final payload = await PasteChannel.instance.getPastePayload();
 
-        if (result != null && result is Map) {
-          final hasImages = result['hasImages'] as bool? ?? false;
-          final hasText = result['hasText'] as bool? ?? false;
-
-          // Process images first (priority to images)
-          if (hasImages) {
-            final imagesList = result['images'] as List?;
-            if (imagesList != null && imagesList.isNotEmpty) {
-              final List<String> uris = [];
-              final List<String> mimeTypes = [];
-
-              final tempDir = await getTemporaryDirectory();
-
-              for (var imageData in imagesList) {
-                if (imageData is Map) {
-                  final data = imageData['data'] as Uint8List?;
-                  final mimeType = imageData['mimeType'] as String?;
-
-                  if (data != null && mimeType != null) {
-                    final extension = _getExtensionFromMimeType(mimeType);
-                    final fileName =
-                        'paste_${DateTime.now().millisecondsSinceEpoch}_${uris.length}.$extension';
-                    final file = File('${tempDir.path}/$fileName');
-
-                    await file.writeAsBytes(data);
-                    uris.add(file.path);
-                    mimeTypes.add(mimeType);
-                  }
-                }
-              }
-
-              if (uris.isNotEmpty) {
-                _notifyImagePaste(uris, mimeTypes);
-                return;
-              }
-            }
-          }
-
-          // Process text if no images or images failed
-          if (hasText) {
-            final text = result['text'] as String?;
-            if (text != null && text.isNotEmpty) {
-              _notifyTextPaste(text);
-              // Actually insert the text into the TextField
-              _insertTextIntoField(editableTextState, text);
-              return;
-            }
-          }
+      if (payload is TextPaste) {
+        _notifyTextPaste(payload.text);
+        _insertTextIntoField(editableTextState, payload.text);
+      } else if (payload is RawImagePaste) {
+        await _handleRawImagePaste(payload);
+      } else {
+        // Fallback to Flutter's clipboard for text
+        final data = await Clipboard.getData(Clipboard.kTextPlain);
+        if (data?.text != null && data!.text!.isNotEmpty) {
+          _notifyTextPaste(data.text!);
+          _insertTextIntoField(editableTextState, data.text!);
         }
-      } catch (e) {
-        // Error reading clipboard content, try fallback
       }
-
-      // Fallback: try to paste text using Flutter's Clipboard
+    } catch (e) {
+      // Error reading clipboard content, try fallback
       try {
         final data = await Clipboard.getData(Clipboard.kTextPlain);
         if (data?.text != null && data!.text!.isNotEmpty) {
           _notifyTextPaste(data.text!);
-          // Actually insert the text into the TextField
           _insertTextIntoField(editableTextState, data.text!);
         }
-      } catch (e) {
+      } catch (_) {
         // Error reading clipboard text
       }
+    }
+  }
+
+  Future<void> _handleRawImagePaste(RawImagePaste payload) async {
+    if (widget.saveImagesToTempFiles) {
+      // Convert raw data to files
+      final tempDir = await getTemporaryDirectory();
+      final List<String> uris = [];
+      final List<String> mimeTypes = [];
+
+      for (int i = 0; i < payload.items.length; i++) {
+        final item = payload.items[i];
+        final extension = _getExtensionFromMimeType(item.mimeType);
+        final fileName = 'paste_${DateTime.now().millisecondsSinceEpoch}_$i.$extension';
+        final file = File('${tempDir.path}/$fileName');
+
+        await file.writeAsBytes(item.data);
+        uris.add(file.path);
+        mimeTypes.add(item.mimeType);
+      }
+
+      if (uris.isNotEmpty) {
+        _notifyImagePaste(uris, mimeTypes);
+      }
+    } else {
+      // Pass raw data directly
+      _notifyRawImagePaste(payload);
     }
   }
 
@@ -383,19 +382,27 @@ class _PasteWrapperState extends State<PasteWrapper> {
 
   Future<void> _handleImageContent(KeyboardInsertedContent content) async {
     try {
-      final tempDir = await getTemporaryDirectory();
-      final extension = _getExtensionFromMimeType(content.mimeType);
-      final fileName =
-          'paste_${DateTime.now().millisecondsSinceEpoch}.$extension';
-      final file = File('${tempDir.path}/$fileName');
-
       if (content.data != null) {
-        await file.writeAsBytes(content.data!);
-        _notifyImagePaste([file.path], [content.mimeType]);
+        if (widget.saveImagesToTempFiles) {
+          final tempDir = await getTemporaryDirectory();
+          final extension = _getExtensionFromMimeType(content.mimeType);
+          final fileName = 'paste_${DateTime.now().millisecondsSinceEpoch}.$extension';
+          final file = File('${tempDir.path}/$fileName');
+          await file.writeAsBytes(content.data!);
+          _notifyImagePaste([file.path], [content.mimeType]);
+        } else {
+          _notifyRawImagePaste(RawImagePaste(
+            items: [RawClipboardItem(data: content.data!, mimeType: content.mimeType)],
+          ));
+        }
       } else {
         // Copy from URI if available
         final sourceFile = File(content.uri);
         if (await sourceFile.exists()) {
+          final tempDir = await getTemporaryDirectory();
+          final extension = _getExtensionFromMimeType(content.mimeType);
+          final fileName = 'paste_${DateTime.now().millisecondsSinceEpoch}.$extension';
+          final file = File('${tempDir.path}/$fileName');
           await sourceFile.copy(file.path);
           _notifyImagePaste([file.path], [content.mimeType]);
         }
@@ -419,15 +426,27 @@ class _PasteWrapperState extends State<PasteWrapper> {
     if (!widget.enabled) return;
 
     try {
-      final data = await Clipboard.getData(Clipboard.kTextPlain);
-      if (data?.text != null) {
-        _notifyTextPaste(data!.text!);
+      // Use Pigeon-based API
+      final payload = await PasteChannel.instance.getPastePayload();
+      if (payload is TextPaste) {
+        _notifyTextPaste(payload.text);
+      } else if (payload is RawImagePaste) {
+        await _handleRawImagePaste(payload);
       } else {
         _notifyUnsupported();
       }
     } catch (e) {
-      // Error reading clipboard
-      _notifyUnsupported();
+      // Fallback to Flutter's clipboard
+      try {
+        final data = await Clipboard.getData(Clipboard.kTextPlain);
+        if (data?.text != null) {
+          _notifyTextPaste(data!.text!);
+        } else {
+          _notifyUnsupported();
+        }
+      } catch (_) {
+        _notifyUnsupported();
+      }
     }
   }
 
@@ -445,6 +464,14 @@ class _PasteWrapperState extends State<PasteWrapper> {
       return;
     }
     widget.onPaste(ImagePaste(uris: uris, mimeTypes: mimeTypes));
+  }
+
+  void _notifyRawImagePaste(RawImagePaste payload) {
+    if (widget.acceptedTypes != null &&
+        !widget.acceptedTypes!.contains(PasteType.image)) {
+      return;
+    }
+    widget.onPaste(payload);
   }
 
   void _notifyUnsupported() {

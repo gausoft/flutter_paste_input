@@ -7,222 +7,136 @@
 
 #include <cstring>
 #include <cstdlib>
-#include <ctime>
 #include <vector>
 #include <string>
 
 #include "flutter_paste_input_plugin_private.h"
+#include "messages.g.h"
 
 #define FLUTTER_PASTE_INPUT_PLUGIN(obj) \
   (G_TYPE_CHECK_INSTANCE_CAST((obj), flutter_paste_input_plugin_get_type(), \
                               FlutterPasteInputPlugin))
 
-#define METHOD_CHANNEL_NAME "dev.gausoft/flutter_paste_input/methods"
-#define EVENT_CHANNEL_NAME "dev.gausoft/flutter_paste_input/events"
 #define TEMP_FILE_PREFIX "paste_"
 
 struct _FlutterPasteInputPlugin {
   GObject parent_instance;
-  FlMethodChannel* method_channel;
-  FlEventChannel* event_channel;
-  FlEventSink* event_sink;
+  FlutterPasteInputPasteInputFlutterApi* flutter_api;
 };
 
 G_DEFINE_TYPE(FlutterPasteInputPlugin, flutter_paste_input_plugin, g_object_get_type())
 
 // Forward declarations
-static void process_clipboard(FlutterPasteInputPlugin* self);
-static void send_text_event(FlutterPasteInputPlugin* self, const gchar* text);
-static void send_image_event(FlutterPasteInputPlugin* self,
-                              const std::vector<std::string>& uris,
-                              const std::vector<std::string>& mime_types);
-static void send_unsupported_event(FlutterPasteInputPlugin* self);
-static gchar* save_temp_file(GdkPixbuf* pixbuf, const gchar* format, const gchar* extension);
+static std::vector<uint8_t> get_image_data(GtkClipboard* clipboard);
+static std::string get_text_data(GtkClipboard* clipboard);
 static void clear_temp_files();
 
-// Get platform version
-FlMethodResponse* get_platform_version() {
-  struct utsname uname_data = {};
-  uname(&uname_data);
-  g_autofree gchar *version = g_strdup_printf("Linux %s", uname_data.version);
-  g_autoptr(FlValue) result = fl_value_new_string(version);
-  return FL_METHOD_RESPONSE(fl_method_success_response_new(result));
-}
+// Global plugin instance for VTable callbacks
+static FlutterPasteInputPlugin* g_plugin_instance = nullptr;
 
-// Handle method calls from Flutter
-static void flutter_paste_input_plugin_handle_method_call(
-    FlutterPasteInputPlugin* self,
-    FlMethodCall* method_call) {
-  g_autoptr(FlMethodResponse) response = nullptr;
+// Pigeon VTable Implementation
 
-  const gchar* method = fl_method_call_get_name(method_call);
-
-  if (strcmp(method, "getPlatformVersion") == 0) {
-    response = get_platform_version();
-  } else if (strcmp(method, "clearTempFiles") == 0) {
-    clear_temp_files();
-    response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-  } else if (strcmp(method, "registerView") == 0) {
-    response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-  } else if (strcmp(method, "unregisterView") == 0) {
-    response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-  } else if (strcmp(method, "checkClipboard") == 0) {
-    process_clipboard(self);
-    response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
-  } else {
-    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
-  }
-
-  fl_method_call_respond(method_call, response, nullptr);
-}
-
-// Process clipboard content
-static void process_clipboard(FlutterPasteInputPlugin* self) {
+static FlutterPasteInputPasteInputHostApiGetClipboardContentResponse*
+handle_get_clipboard_content(gpointer user_data) {
   GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  g_autoptr(FlValue) items = fl_value_new_list();
 
   // Check for image first
   if (gtk_clipboard_wait_is_image_available(clipboard)) {
-    GdkPixbuf* pixbuf = gtk_clipboard_wait_for_image(clipboard);
-    if (pixbuf != nullptr) {
-      std::vector<std::string> uris;
-      std::vector<std::string> mime_types;
-
-      // Save as PNG
-      gchar* path = save_temp_file(pixbuf, "png", "png");
-      if (path != nullptr) {
-        uris.push_back(path);
-        mime_types.push_back("image/png");
-        g_free(path);
-      }
-
-      g_object_unref(pixbuf);
-
-      if (!uris.empty()) {
-        send_image_event(self, uris, mime_types);
-        return;
-      }
+    std::vector<uint8_t> image_data = get_image_data(clipboard);
+    if (!image_data.empty()) {
+      FlutterPasteInputClipboardItem* item =
+          flutter_paste_input_clipboard_item_new(
+              image_data.data(),
+              image_data.size(),
+              "image/png");
+      fl_value_append(items, fl_value_new_custom_object(G_OBJECT(item)));
+      g_object_unref(item);
     }
   }
 
   // Check for text
   if (gtk_clipboard_wait_is_text_available(clipboard)) {
-    gchar* text = gtk_clipboard_wait_for_text(clipboard);
-    if (text != nullptr) {
-      send_text_event(self, text);
-      g_free(text);
-      return;
+    std::string text = get_text_data(clipboard);
+    if (!text.empty()) {
+      FlutterPasteInputClipboardItem* item =
+          flutter_paste_input_clipboard_item_new(
+              reinterpret_cast<const uint8_t*>(text.data()),
+              text.size(),
+              "text/plain");
+      fl_value_append(items, fl_value_new_custom_object(G_OBJECT(item)));
+      g_object_unref(item);
     }
   }
 
-  // Check for URIs (might be image files)
-  if (gtk_clipboard_wait_is_uris_available(clipboard)) {
-    gchar** uris = gtk_clipboard_wait_for_uris(clipboard);
-    if (uris != nullptr) {
-      std::vector<std::string> image_uris;
-      std::vector<std::string> mime_types;
+  FlutterPasteInputClipboardContent* content =
+      flutter_paste_input_clipboard_content_new(items);
 
-      for (gchar** uri = uris; *uri != nullptr; uri++) {
-        // Check if it's an image file
-        gchar* filename = g_filename_from_uri(*uri, nullptr, nullptr);
-        if (filename != nullptr) {
-          GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(filename, nullptr);
-          if (pixbuf != nullptr) {
-            gchar* path = save_temp_file(pixbuf, "png", "png");
-            if (path != nullptr) {
-              image_uris.push_back(path);
-              mime_types.push_back("image/png");
-              g_free(path);
-            }
-            g_object_unref(pixbuf);
-          }
-          g_free(filename);
-        }
-      }
+  FlutterPasteInputPasteInputHostApiGetClipboardContentResponse* response =
+      flutter_paste_input_paste_input_host_api_get_clipboard_content_response_new(content);
 
-      g_strfreev(uris);
-
-      if (!image_uris.empty()) {
-        send_image_event(self, image_uris, mime_types);
-        return;
-      }
-    }
-  }
-
-  send_unsupported_event(self);
+  g_object_unref(content);
+  return response;
 }
 
-// Save pixbuf to temporary file
-static gchar* save_temp_file(GdkPixbuf* pixbuf, const gchar* format, const gchar* extension) {
-  const gchar* temp_dir = g_get_tmp_dir();
-  guint64 timestamp = g_get_real_time() / 1000;
-  gint random = g_random_int_range(0, 99999);
+static FlutterPasteInputPasteInputHostApiClearTempFilesResponse*
+handle_clear_temp_files(gpointer user_data) {
+  clear_temp_files();
+  return flutter_paste_input_paste_input_host_api_clear_temp_files_response_new();
+}
 
-  g_autofree gchar* filename = g_strdup_printf("%s/%s%lu_%d.%s",
-                                                temp_dir,
-                                                TEMP_FILE_PREFIX,
-                                                timestamp,
-                                                random,
-                                                extension);
+static FlutterPasteInputPasteInputHostApiGetPlatformVersionResponse*
+handle_get_platform_version(gpointer user_data) {
+  struct utsname uname_data = {};
+  uname(&uname_data);
+  g_autofree gchar* version = g_strdup_printf("Linux %s", uname_data.release);
+  return flutter_paste_input_paste_input_host_api_get_platform_version_response_new(version);
+}
 
-  GError* error = nullptr;
-  if (gdk_pixbuf_save(pixbuf, filename, format, &error, nullptr)) {
-    return g_strdup(filename);
+// VTable for Pigeon Host API
+static FlutterPasteInputPasteInputHostApiVTable host_api_vtable = {
+    .get_clipboard_content = handle_get_clipboard_content,
+    .clear_temp_files = handle_clear_temp_files,
+    .get_platform_version = handle_get_platform_version,
+};
+
+// Helper Functions
+
+static std::vector<uint8_t> get_image_data(GtkClipboard* clipboard) {
+  std::vector<uint8_t> result;
+
+  GdkPixbuf* pixbuf = gtk_clipboard_wait_for_image(clipboard);
+  if (pixbuf == nullptr) {
+    return result;
   }
 
-  if (error != nullptr) {
-    g_warning("FlutterPasteInput: Failed to save temp file: %s", error->message);
+  gchar* buffer = nullptr;
+  gsize buffer_size = 0;
+  GError* error = nullptr;
+
+  if (gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &buffer_size, "png", &error, nullptr)) {
+    result.assign(reinterpret_cast<uint8_t*>(buffer),
+                  reinterpret_cast<uint8_t*>(buffer) + buffer_size);
+    g_free(buffer);
+  } else if (error != nullptr) {
+    g_warning("FlutterPasteInput: Failed to save image: %s", error->message);
     g_error_free(error);
   }
 
-  return nullptr;
+  g_object_unref(pixbuf);
+  return result;
 }
 
-// Send text event to Flutter
-static void send_text_event(FlutterPasteInputPlugin* self, const gchar* text) {
-  if (self->event_sink == nullptr) return;
-
-  g_autoptr(FlValue) event = fl_value_new_map();
-  fl_value_set_string_take(event, "type", fl_value_new_string("text"));
-  fl_value_set_string_take(event, "value", fl_value_new_string(text));
-
-  fl_event_sink_success(self->event_sink, event, nullptr);
-}
-
-// Send image event to Flutter
-static void send_image_event(FlutterPasteInputPlugin* self,
-                              const std::vector<std::string>& uris,
-                              const std::vector<std::string>& mime_types) {
-  if (self->event_sink == nullptr) return;
-
-  g_autoptr(FlValue) uris_list = fl_value_new_list();
-  for (const auto& uri : uris) {
-    fl_value_append_take(uris_list, fl_value_new_string(uri.c_str()));
+static std::string get_text_data(GtkClipboard* clipboard) {
+  gchar* text = gtk_clipboard_wait_for_text(clipboard);
+  if (text == nullptr) {
+    return std::string();
   }
-
-  g_autoptr(FlValue) types_list = fl_value_new_list();
-  for (const auto& type : mime_types) {
-    fl_value_append_take(types_list, fl_value_new_string(type.c_str()));
-  }
-
-  g_autoptr(FlValue) event = fl_value_new_map();
-  fl_value_set_string_take(event, "type", fl_value_new_string("images"));
-  fl_value_set_string(event, "uris", uris_list);
-  fl_value_set_string(event, "mimeTypes", types_list);
-
-  fl_event_sink_success(self->event_sink, event, nullptr);
+  std::string result(text);
+  g_free(text);
+  return result;
 }
 
-// Send unsupported event to Flutter
-static void send_unsupported_event(FlutterPasteInputPlugin* self) {
-  if (self->event_sink == nullptr) return;
-
-  g_autoptr(FlValue) event = fl_value_new_map();
-  fl_value_set_string_take(event, "type", fl_value_new_string("unsupported"));
-
-  fl_event_sink_success(self->event_sink, event, nullptr);
-}
-
-// Clear temporary files
 static void clear_temp_files() {
   const gchar* temp_dir = g_get_tmp_dir();
   GDir* dir = g_dir_open(temp_dir, 0, nullptr);
@@ -239,29 +153,62 @@ static void clear_temp_files() {
   }
 }
 
-// Event channel listen callback
-static FlMethodErrorResponse* on_listen(FlEventChannel* channel,
-                                         FlValue* args,
-                                         gpointer user_data) {
-  FlutterPasteInputPlugin* self = FLUTTER_PASTE_INPUT_PLUGIN(user_data);
-  self->event_sink = fl_event_channel_get_event_sink(channel);
-  return nullptr;
+// Notify Flutter about paste events
+void flutter_paste_input_plugin_notify_paste(FlutterPasteInputPlugin* self) {
+  if (self == nullptr || self->flutter_api == nullptr) {
+    return;
+  }
+
+  GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+  g_autoptr(FlValue) items = fl_value_new_list();
+
+  // Get image data
+  if (gtk_clipboard_wait_is_image_available(clipboard)) {
+    std::vector<uint8_t> image_data = get_image_data(clipboard);
+    if (!image_data.empty()) {
+      FlutterPasteInputClipboardItem* item =
+          flutter_paste_input_clipboard_item_new(
+              image_data.data(),
+              image_data.size(),
+              "image/png");
+      fl_value_append(items, fl_value_new_custom_object(G_OBJECT(item)));
+      g_object_unref(item);
+    }
+  }
+
+  // Get text data
+  if (gtk_clipboard_wait_is_text_available(clipboard)) {
+    std::string text = get_text_data(clipboard);
+    if (!text.empty()) {
+      FlutterPasteInputClipboardItem* item =
+          flutter_paste_input_clipboard_item_new(
+              reinterpret_cast<const uint8_t*>(text.data()),
+              text.size(),
+              "text/plain");
+      fl_value_append(items, fl_value_new_custom_object(G_OBJECT(item)));
+      g_object_unref(item);
+    }
+  }
+
+  FlutterPasteInputClipboardContent* content =
+      flutter_paste_input_clipboard_content_new(items);
+
+  flutter_paste_input_paste_input_flutter_api_on_paste_detected(
+      self->flutter_api, content, nullptr, nullptr, nullptr);
+
+  g_object_unref(content);
 }
 
-// Event channel cancel callback
-static FlMethodErrorResponse* on_cancel(FlEventChannel* channel,
-                                         FlValue* args,
-                                         gpointer user_data) {
-  FlutterPasteInputPlugin* self = FLUTTER_PASTE_INPUT_PLUGIN(user_data);
-  self->event_sink = nullptr;
-  return nullptr;
-}
+// Plugin lifecycle
 
 static void flutter_paste_input_plugin_dispose(GObject* object) {
   FlutterPasteInputPlugin* self = FLUTTER_PASTE_INPUT_PLUGIN(object);
 
-  g_clear_object(&self->method_channel);
-  g_clear_object(&self->event_channel);
+  g_clear_object(&self->flutter_api);
+
+  if (g_plugin_instance == self) {
+    g_plugin_instance = nullptr;
+  }
 
   G_OBJECT_CLASS(flutter_paste_input_plugin_parent_class)->dispose(object);
 }
@@ -271,41 +218,29 @@ static void flutter_paste_input_plugin_class_init(FlutterPasteInputPluginClass* 
 }
 
 static void flutter_paste_input_plugin_init(FlutterPasteInputPlugin* self) {
-  self->event_sink = nullptr;
-}
-
-static void method_call_cb(FlMethodChannel* channel, FlMethodCall* method_call,
-                           gpointer user_data) {
-  FlutterPasteInputPlugin* plugin = FLUTTER_PASTE_INPUT_PLUGIN(user_data);
-  flutter_paste_input_plugin_handle_method_call(plugin, method_call);
+  self->flutter_api = nullptr;
 }
 
 void flutter_paste_input_plugin_register_with_registrar(FlPluginRegistrar* registrar) {
   FlutterPasteInputPlugin* plugin = FLUTTER_PASTE_INPUT_PLUGIN(
       g_object_new(flutter_paste_input_plugin_get_type(), nullptr));
 
-  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  g_plugin_instance = plugin;
 
-  // Method channel
-  plugin->method_channel = fl_method_channel_new(
-      fl_plugin_registrar_get_messenger(registrar),
-      METHOD_CHANNEL_NAME,
-      FL_METHOD_CODEC(codec));
-  fl_method_channel_set_method_call_handler(plugin->method_channel,
-                                            method_call_cb,
-                                            g_object_ref(plugin),
-                                            g_object_unref);
+  FlBinaryMessenger* messenger = fl_plugin_registrar_get_messenger(registrar);
 
-  // Event channel
-  plugin->event_channel = fl_event_channel_new(
-      fl_plugin_registrar_get_messenger(registrar),
-      EVENT_CHANNEL_NAME,
-      FL_METHOD_CODEC(codec));
-  fl_event_channel_set_stream_handlers(plugin->event_channel,
-                                        on_listen,
-                                        on_cancel,
-                                        g_object_ref(plugin),
-                                        g_object_unref);
+  // Set up Pigeon Host API
+  flutter_paste_input_paste_input_host_api_set_method_handlers(
+      messenger,
+      nullptr,  // no suffix
+      &host_api_vtable,
+      plugin,
+      nullptr);  // no free func
+
+  // Set up Pigeon Flutter API (for calling Dart)
+  plugin->flutter_api = flutter_paste_input_paste_input_flutter_api_new(
+      messenger,
+      nullptr);  // no suffix
 
   g_object_unref(plugin);
 }

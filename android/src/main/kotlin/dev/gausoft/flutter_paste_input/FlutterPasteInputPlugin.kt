@@ -3,7 +3,6 @@ package dev.gausoft.flutter_paste_input
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
-import android.content.ContentResolver
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -11,150 +10,88 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import io.flutter.embedding.engine.plugins.FlutterPlugin
-import io.flutter.plugin.common.EventChannel
-import io.flutter.plugin.common.MethodCall
-import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.MethodChannel.MethodCallHandler
-import io.flutter.plugin.common.MethodChannel.Result
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
 
 /**
  * Flutter plugin for intercepting paste events and extracting clipboard content.
  *
  * This plugin provides access to rich clipboard content including text and images,
- * and sends paste events to Flutter via EventChannel.
+ * using Pigeon for type-safe communication with Flutter.
  */
-class FlutterPasteInputPlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamHandler {
+class FlutterPasteInputPlugin : FlutterPlugin, PasteInputHostApi {
 
-    private lateinit var methodChannel: MethodChannel
-    private lateinit var eventChannel: EventChannel
     private lateinit var context: Context
-    private var eventSink: EventChannel.EventSink? = null
     private var clipboardManager: ClipboardManager? = null
-    private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
+    private var flutterApi: PasteInputFlutterApi? = null
 
     companion object {
         private const val TAG = "FlutterPasteInput"
-        private const val METHOD_CHANNEL = "dev.gausoft/flutter_paste_input/methods"
-        private const val EVENT_CHANNEL = "dev.gausoft/flutter_paste_input/events"
         private const val TEMP_FILE_PREFIX = "paste_"
     }
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         context = flutterPluginBinding.applicationContext
-
-        methodChannel = MethodChannel(flutterPluginBinding.binaryMessenger, METHOD_CHANNEL)
-        methodChannel.setMethodCallHandler(this)
-
-        eventChannel = EventChannel(flutterPluginBinding.binaryMessenger, EVENT_CHANNEL)
-        eventChannel.setStreamHandler(this)
-
         clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+
+        // Set up Pigeon APIs
+        PasteInputHostApi.setUp(flutterPluginBinding.binaryMessenger, this)
+        flutterApi = PasteInputFlutterApi(flutterPluginBinding.binaryMessenger)
     }
 
-    override fun onMethodCall(call: MethodCall, result: Result) {
-        when (call.method) {
-            "getPlatformVersion" -> {
-                result.success("Android ${Build.VERSION.RELEASE}")
-            }
-            "clearTempFiles" -> {
-                clearTempFiles()
-                result.success(null)
-            }
-            "registerView" -> {
-                // Start listening for clipboard changes when a view is registered
-                startClipboardMonitoring()
-                result.success(null)
-            }
-            "unregisterView" -> {
-                result.success(null)
-            }
-            "checkClipboard" -> {
-                // Manual clipboard check triggered from Flutter
-                processClipboard()
-                result.success(null)
-            }
-            "getClipboardImage" -> {
-                getClipboardImage(result)
-            }
-            "getClipboardContent" -> {
-                getClipboardContent(result)
-            }
-            else -> {
-                result.notImplemented()
-            }
-        }
+    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        PasteInputHostApi.setUp(binding.binaryMessenger, null)
+        flutterApi = null
     }
 
-    // MARK: - EventChannel.StreamHandler
+    // MARK: - PasteInputHostApi Implementation
 
-    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-        eventSink = events
-    }
+    override fun getClipboardContent(): ClipboardContent {
+        val items = mutableListOf<ClipboardItem>()
+        val clipData = clipboardManager?.primaryClip
 
-    override fun onCancel(arguments: Any?) {
-        eventSink = null
-    }
-
-    // MARK: - Clipboard Monitoring
-
-    private fun startClipboardMonitoring() {
-        if (clipboardListener != null) return
-
-        clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
-            // Note: We don't automatically process on clipboard change
-            // because it would fire for any clipboard change in the system.
-            // Instead, we wait for Flutter to trigger via checkClipboard method
-            // when the user actually performs a paste action.
+        if (clipData == null || clipData.itemCount == 0) {
+            return ClipboardContent(items = items)
         }
 
-        clipboardManager?.addPrimaryClipChangedListener(clipboardListener!!)
-    }
-
-    private fun stopClipboardMonitoring() {
-        clipboardListener?.let {
-            clipboardManager?.removePrimaryClipChangedListener(it)
-        }
-        clipboardListener = null
-    }
-
-    /**
-     * Process the current clipboard content and send an event to Flutter.
-     */
-    private fun processClipboard() {
-        val clipData = clipboardManager?.primaryClip ?: run {
-            sendUnsupportedEvent()
-            return
-        }
-
-        if (clipData.itemCount == 0) {
-            sendUnsupportedEvent()
-            return
-        }
-
-        // Check for images first
+        // Process images first
         if (hasImages(clipData)) {
-            processImages(clipData)
-            return
+            val imageItems = extractImageItems(clipData)
+            items.addAll(imageItems)
         }
 
-        // Check for text
+        // Then process text
         val text = getTextFromClipboard(clipData)
         if (text != null) {
-            sendTextEvent(text)
-            return
+            val textBytes = text.toByteArray(Charsets.UTF_8)
+            items.add(ClipboardItem(data = textBytes, mimeType = "text/plain"))
         }
 
-        sendUnsupportedEvent()
+        return ClipboardContent(items = items)
     }
+
+    override fun clearTempFiles() {
+        try {
+            val cacheDir = context.cacheDir
+            cacheDir.listFiles()?.filter {
+                it.name.startsWith(TEMP_FILE_PREFIX)
+            }?.forEach { file ->
+                file.delete()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear temp files: ${e.message}")
+        }
+    }
+
+    override fun getPlatformVersion(): String {
+        return "Android ${Build.VERSION.RELEASE}"
+    }
+
+    // MARK: - Helper Methods
 
     private fun hasImages(clipData: ClipData): Boolean {
         val description = clipData.description
         if (description.hasMimeType(ClipDescription.MIMETYPE_TEXT_URILIST)) {
-            // Check if the URI points to an image
             for (i in 0 until clipData.itemCount) {
                 val uri = clipData.getItemAt(i).uri
                 if (uri != null && isImageUri(uri)) {
@@ -163,7 +100,6 @@ class FlutterPasteInputPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
             }
         }
 
-        // Check for image MIME types
         for (i in 0 until description.mimeTypeCount) {
             val mimeType = description.getMimeType(i)
             if (mimeType.startsWith("image/")) {
@@ -179,174 +115,8 @@ class FlutterPasteInputPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
         return mimeType.startsWith("image/")
     }
 
-    private fun processImages(clipData: ClipData) {
-        val uris = mutableListOf<String>()
-        val mimeTypes = mutableListOf<String>()
-
-        for (i in 0 until clipData.itemCount) {
-            val item = clipData.getItemAt(i)
-            val uri = item.uri
-
-            if (uri != null) {
-                val mimeType = context.contentResolver.getType(uri)
-                if (mimeType != null && mimeType.startsWith("image/")) {
-                    val savedPath = saveImageFromUri(uri, mimeType)
-                    if (savedPath != null) {
-                        uris.add(savedPath)
-                        mimeTypes.add(mimeType)
-                    }
-                }
-            }
-        }
-
-        if (uris.isNotEmpty()) {
-            sendImageEvent(uris, mimeTypes)
-        } else {
-            sendUnsupportedEvent()
-        }
-    }
-
-    private fun saveImageFromUri(uri: Uri, mimeType: String): String? {
-        return try {
-            val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
-            inputStream?.use { stream ->
-                val extension = when (mimeType) {
-                    "image/png" -> "png"
-                    "image/jpeg" -> "jpg"
-                    "image/gif" -> "gif"
-                    "image/webp" -> "webp"
-                    else -> "png"
-                }
-
-                val timestamp = System.currentTimeMillis()
-                val randomSuffix = (Math.random() * 100000).toInt()
-                val fileName = "${TEMP_FILE_PREFIX}${timestamp}_${randomSuffix}.$extension"
-                val file = File(context.cacheDir, fileName)
-
-                if (mimeType == "image/gif") {
-                    // For GIFs, copy the raw data to preserve animation
-                    FileOutputStream(file).use { output ->
-                        stream.copyTo(output)
-                    }
-                } else {
-                    // For other images, decode and re-encode
-                    val bitmap = BitmapFactory.decodeStream(stream)
-                    if (bitmap != null) {
-                        FileOutputStream(file).use { output ->
-                            val format = when (mimeType) {
-                                "image/jpeg" -> Bitmap.CompressFormat.JPEG
-                                "image/webp" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                    Bitmap.CompressFormat.WEBP_LOSSLESS
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    Bitmap.CompressFormat.WEBP
-                                }
-                                else -> Bitmap.CompressFormat.PNG
-                            }
-                            bitmap.compress(format, 100, output)
-                        }
-                        bitmap.recycle()
-                    } else {
-                        // If bitmap decoding fails, copy raw data
-                        context.contentResolver.openInputStream(uri)?.use { retryStream ->
-                            FileOutputStream(file).use { output ->
-                                retryStream.copyTo(output)
-                            }
-                        }
-                    }
-                }
-
-                file.absolutePath
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save image from URI: ${e.message}")
-            null
-        }
-    }
-
-    private fun getTextFromClipboard(clipData: ClipData): String? {
-        val item = clipData.getItemAt(0)
-
-        // Try to get as text directly
-        val text = item.text?.toString()
-        if (text != null) {
-            return text
-        }
-
-        // Try to coerce to text
-        return try {
-            item.coerceToText(context)?.toString()
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    /**
-     * Get clipboard content and return it to Flutter via result.
-     * Returns a map with:
-     * - "hasText": Boolean
-     * - "hasImages": Boolean
-     * - "text": String? (if text is available)
-     * - "images": List of maps with "data" and "mimeType" (if images are available)
-     */
-    private fun getClipboardContent(result: Result) {
-        val clipData = clipboardManager?.primaryClip
-        
-        if (clipData == null || clipData.itemCount == 0) {
-            result.success(mapOf(
-                "hasText" to false,
-                "hasImages" to false
-            ))
-            return
-        }
-
-        val response = mutableMapOf<String, Any?>()
-        
-        // Check for text
-        val text = getTextFromClipboard(clipData)
-        response["hasText"] = text != null
-        if (text != null) {
-            response["text"] = text
-        }
-
-        // Check for images
-        val hasImages = hasImages(clipData)
-        response["hasImages"] = hasImages
-        
-        if (hasImages) {
-            val images = getImagesData(clipData)
-            if (images.isNotEmpty()) {
-                response["images"] = images
-            }
-        }
-
-        result.success(response)
-    }
-
-    /**
-     * Get clipboard images as byte arrays.
-     */
-    private fun getClipboardImage(result: Result) {
-        val clipData = clipboardManager?.primaryClip
-        
-        if (clipData == null || clipData.itemCount == 0 || !hasImages(clipData)) {
-            result.success(null)
-            return
-        }
-
-        val images = getImagesData(clipData)
-        if (images.isNotEmpty()) {
-            result.success(mapOf("images" to images))
-        } else {
-            result.success(null)
-        }
-    }
-
-    /**
-     * Extract image data as byte arrays from clipboard.
-     */
-    private fun getImagesData(clipData: ClipData): List<Map<String, Any>> {
-        val images = mutableListOf<Map<String, Any>>()
+    private fun extractImageItems(clipData: ClipData): List<ClipboardItem> {
+        val items = mutableListOf<ClipboardItem>()
 
         for (i in 0 until clipData.itemCount) {
             val item = clipData.getItemAt(i)
@@ -357,21 +127,15 @@ class FlutterPasteInputPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
                 if (mimeType != null && mimeType.startsWith("image/")) {
                     val imageData = getImageBytes(uri, mimeType)
                     if (imageData != null) {
-                        images.add(mapOf(
-                            "data" to imageData,
-                            "mimeType" to mimeType
-                        ))
+                        items.add(ClipboardItem(data = imageData, mimeType = mimeType))
                     }
                 }
             }
         }
 
-        return images
+        return items
     }
 
-    /**
-     * Read image bytes from URI.
-     */
     private fun getImageBytes(uri: Uri, mimeType: String): ByteArray? {
         return try {
             context.contentResolver.openInputStream(uri)?.use { stream ->
@@ -408,48 +172,33 @@ class FlutterPasteInputPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
         }
     }
 
-    // MARK: - Event Sending
+    private fun getTextFromClipboard(clipData: ClipData): String? {
+        val item = clipData.getItemAt(0)
 
-    private fun sendTextEvent(text: String) {
-        val event = mapOf(
-            "type" to "text",
-            "value" to text
-        )
-        eventSink?.success(event)
-    }
+        // Try to get as text directly
+        val text = item.text?.toString()
+        if (text != null) {
+            return text
+        }
 
-    private fun sendImageEvent(uris: List<String>, mimeTypes: List<String>) {
-        val event = mapOf(
-            "type" to "images",
-            "uris" to uris,
-            "mimeTypes" to mimeTypes
-        )
-        eventSink?.success(event)
-    }
-
-    private fun sendUnsupportedEvent() {
-        val event = mapOf("type" to "unsupported")
-        eventSink?.success(event)
-    }
-
-    // MARK: - Cleanup
-
-    private fun clearTempFiles() {
-        try {
-            val cacheDir = context.cacheDir
-            cacheDir.listFiles()?.filter {
-                it.name.startsWith(TEMP_FILE_PREFIX)
-            }?.forEach { file ->
-                file.delete()
-            }
+        // Try to coerce to text
+        return try {
+            item.coerceToText(context)?.toString()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to clear temp files: ${e.message}")
+            null
         }
     }
 
-    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        stopClipboardMonitoring()
-        methodChannel.setMethodCallHandler(null)
-        eventChannel.setStreamHandler(null)
+    /**
+     * Notifies Flutter about a paste event.
+     * Call this from swizzled paste handlers or clipboard listeners.
+     */
+    fun notifyPasteDetected() {
+        val content = getClipboardContent()
+        flutterApi?.onPasteDetected(content) { result ->
+            result.onFailure { error ->
+                Log.e(TAG, "Failed to notify paste: ${error.message}")
+            }
+        }
     }
 }

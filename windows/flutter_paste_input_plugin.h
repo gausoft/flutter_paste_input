@@ -1,23 +1,21 @@
 #ifndef FLUTTER_PLUGIN_FLUTTER_PASTE_INPUT_PLUGIN_H_
 #define FLUTTER_PLUGIN_FLUTTER_PASTE_INPUT_PLUGIN_H_
 
-#include <flutter/event_channel.h>
-#include <flutter/event_sink.h>
-#include <flutter/event_stream_handler_functions.h>
-#include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
 
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "messages.g.h"
+
 namespace flutter_paste_input {
 
-class FlutterPasteInputPlugin : public flutter::Plugin {
+class FlutterPasteInputPlugin : public flutter::Plugin, public PasteInputHostApi {
  public:
   static void RegisterWithRegistrar(flutter::PluginRegistrarWindows *registrar);
 
-  FlutterPasteInputPlugin();
+  FlutterPasteInputPlugin(flutter::BinaryMessenger* messenger);
 
   virtual ~FlutterPasteInputPlugin();
 
@@ -25,41 +23,25 @@ class FlutterPasteInputPlugin : public flutter::Plugin {
   FlutterPasteInputPlugin(const FlutterPasteInputPlugin&) = delete;
   FlutterPasteInputPlugin& operator=(const FlutterPasteInputPlugin&) = delete;
 
-  // Called when a method is called on this plugin's channel from Dart.
-  void HandleMethodCall(
-      const flutter::MethodCall<flutter::EncodableValue> &method_call,
-      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  // PasteInputHostApi implementation
+  ErrorOr<ClipboardContent> GetClipboardContent() override;
+  std::optional<FlutterError> ClearTempFiles() override;
+  ErrorOr<std::string> GetPlatformVersion() override;
 
-  // Set the event sink for sending paste events
-  void SetEventSink(std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> sink);
-
-  // Clear the event sink
-  void ClearEventSink();
+  // Notify Flutter about a paste event
+  void NotifyPasteDetected();
 
  private:
-  // Process clipboard content and send event
-  void ProcessClipboard();
+  // Extract image data from clipboard
+  std::vector<uint8_t> GetBitmapData();
 
-  // Send text event to Flutter
-  void SendTextEvent(const std::string& text);
-
-  // Send image event to Flutter
-  void SendImageEvent(const std::vector<std::string>& uris,
-                      const std::vector<std::string>& mime_types);
-
-  // Send unsupported event to Flutter
-  void SendUnsupportedEvent();
-
-  // Save bitmap to temporary file
-  std::string SaveBitmapToFile(HBITMAP hBitmap);
-
-  // Clear temporary files
-  void ClearTempFiles();
+  // Extract text from clipboard
+  std::string GetTextData();
 
   // Get temporary directory path
   std::wstring GetTempPath();
 
-  std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink_;
+  std::unique_ptr<PasteInputFlutterApi> flutter_api_;
 };
 
 }  // namespace flutter_paste_input

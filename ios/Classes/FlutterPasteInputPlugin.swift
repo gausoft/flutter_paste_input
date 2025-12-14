@@ -4,31 +4,19 @@ import MobileCoreServices
 import UniformTypeIdentifiers
 
 /// Flutter plugin for intercepting paste events in text fields.
-public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
+public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, PasteInputHostApi {
 
-    private var eventSink: FlutterEventSink?
     private static var swizzled = false
     private static weak var sharedInstance: FlutterPasteInputPlugin?
+    private var flutterApi: PasteInputFlutterApi?
 
     public static func register(with registrar: FlutterPluginRegistrar) {
-        print("FlutterPasteInput: Registering plugin")
-        // Method channel for calling native methods
-        let methodChannel = FlutterMethodChannel(
-            name: "dev.gausoft/flutter_paste_input/methods",
-            binaryMessenger: registrar.messenger()
-        )
-
-        // Event channel for sending paste events to Flutter
-        let eventChannel = FlutterEventChannel(
-            name: "dev.gausoft/flutter_paste_input/events",
-            binaryMessenger: registrar.messenger()
-        )
-
         let instance = FlutterPasteInputPlugin()
         sharedInstance = instance
 
-        registrar.addMethodCallDelegate(instance, channel: methodChannel)
-        eventChannel.setStreamHandler(instance)
+        // Set up Pigeon APIs
+        PasteInputHostApiSetup.setUp(binaryMessenger: registrar.messenger(), api: instance)
+        instance.flutterApi = PasteInputFlutterApi(binaryMessenger: registrar.messenger())
 
         // Perform swizzling once
         if !swizzled {
@@ -37,84 +25,59 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         }
     }
 
-    // MARK: - FlutterStreamHandler
+    // MARK: - PasteInputHostApi Implementation
 
-    public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-        self.eventSink = events
-        return nil
-    }
-
-    public func onCancel(withArguments arguments: Any?) -> FlutterError? {
-        self.eventSink = nil
-        return nil
-    }
-
-    // MARK: - Method Channel Handler
-
-    public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        switch call.method {
-        case "getPlatformVersion":
-            result("iOS " + UIDevice.current.systemVersion)
-        case "clearTempFiles":
-            clearTempFiles()
-            result(nil)
-        case "registerView":
-            // View registration is handled automatically via swizzling
-            result(nil)
-        case "unregisterView":
-            result(nil)
-        case "getClipboardImage":
-            getClipboardImage(result: result)
-        case "getClipboardContent":
-            getClipboardContent(result: result)
-        default:
-            result(FlutterMethodNotImplemented)
-        }
-    }
-
-    /// Get clipboard content and return it to Flutter.
-    /// Returns a dictionary with:
-    /// - "hasText": Bool
-    /// - "hasImages": Bool
-    /// - "text": String? (if text is available)
-    /// - "images": [[String: Any]]? (if images are available)
-    private func getClipboardContent(result: @escaping FlutterResult) {
+    func getClipboardContent() throws -> ClipboardContent {
         let pasteboard = UIPasteboard.general
-        
-        var response: [String: Any] = [:]
-        
-        // Check for text
-        let hasText = pasteboard.hasStrings
-        response["hasText"] = hasText
-        if hasText, let text = pasteboard.string {
-            response["text"] = text
+        var items: [ClipboardItem] = []
+
+        // Process images first
+        if pasteboard.hasImages {
+            let imageItems = extractImageItems(from: pasteboard)
+            items.append(contentsOf: imageItems)
         }
-        
-        // Check for images
-        let hasImages = pasteboard.hasImages
-        response["hasImages"] = hasImages
-        
-        if hasImages {
-            let images = getImagesData(from: pasteboard)
-            if !images.isEmpty {
-                response["images"] = images
+
+        // Process text
+        if pasteboard.hasStrings, let text = pasteboard.string {
+            if let textData = text.data(using: .utf8) {
+                items.append(ClipboardItem(
+                    data: FlutterStandardTypedData(bytes: textData),
+                    mimeType: "text/plain"
+                ))
             }
         }
-        
-        result(response)
+
+        return ClipboardContent(items: items)
     }
-    
-    /// Extract image data as byte arrays from pasteboard
-    private func getImagesData(from pasteboard: UIPasteboard) -> [[String: Any]] {
-        var images: [[String: Any]] = []
+
+    func clearTempFiles() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        do {
+            let files = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
+            for file in files where file.lastPathComponent.hasPrefix("paste_") {
+                try? FileManager.default.removeItem(at: file)
+            }
+        } catch {
+            print("FlutterPasteInput: Failed to clear temp files: \(error)")
+        }
+    }
+
+    func getPlatformVersion() throws -> String {
+        return "iOS " + UIDevice.current.systemVersion
+    }
+
+    // MARK: - Image Extraction
+
+    private func extractImageItems(from pasteboard: UIPasteboard) -> [ClipboardItem] {
+        var items: [ClipboardItem] = []
         let itemCount = pasteboard.numberOfItems
-        
+
         for i in 0..<itemCount {
             let indexSet = IndexSet(integer: i)
-            
+
             var imageData: Data?
             var mimeType: String?
-            
+
             // Check for GIF first
             if let gifData = getGifData(from: pasteboard, at: indexSet) {
                 imageData = gifData
@@ -138,33 +101,16 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
                 imageData = image.pngData()
                 mimeType = "image/png"
             }
-            
+
             if let data = imageData, let mime = mimeType {
-                images.append([
-                    "data": FlutterStandardTypedData(bytes: data),
-                    "mimeType": mime
-                ])
+                items.append(ClipboardItem(
+                    data: FlutterStandardTypedData(bytes: data),
+                    mimeType: mime
+                ))
             }
         }
-        
-        return images
-    }
 
-    private func getClipboardImage(result: @escaping FlutterResult) {
-        let pasteboard = UIPasteboard.general
-        
-        if !pasteboard.hasImages {
-            result(nil)
-            return
-        }
-        
-        let images = getImagesData(from: pasteboard)
-        
-        if !images.isEmpty {
-            result(["images": images])
-        } else {
-            result(nil)
-        }
+        return items
     }
 
     private func getGifData(from pasteboard: UIPasteboard, at indexSet: IndexSet) -> Data? {
@@ -173,7 +119,7 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
             "com.compuserve.gif",
             "public.gif"
         ]
-        
+
         for gifType in gifTypes {
             if let dataArray = pasteboard.data(forPasteboardType: gifType, inItemSet: indexSet),
                let data = dataArray.first,
@@ -181,168 +127,41 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
                 return data
             }
         }
-        
+
         return nil
-    }
-
-
-
-    // MARK: - Paste Event Handling
-
-    /// Called when a paste event is detected
-    static func handlePasteEvent() {
-        guard let instance = sharedInstance else { return }
-        instance.processPasteboard()
-    }
-
-    private func processPasteboard() {
-        let pasteboard = UIPasteboard.general
-
-        // Check for images first
-        if pasteboard.hasImages {
-            processImages(from: pasteboard)
-            return
-        }
-
-        // Check for text
-        if pasteboard.hasStrings, let text = pasteboard.string {
-            sendTextEvent(text)
-            return
-        }
-
-        // Unsupported content
-        sendUnsupportedEvent()
-    }
-
-    private func processImages(from pasteboard: UIPasteboard) {
-        var uris: [String] = []
-        var mimeTypes: [String] = []
-
-        // Get all items from pasteboard
-        let itemCount = pasteboard.numberOfItems
-
-        for i in 0..<itemCount {
-            let indexSet = IndexSet(integer: i)
-
-            // Check for GIF first (need raw data to preserve animation)
-            if let gifData = getGifData(from: pasteboard, at: indexSet) {
-                if let uri = saveTempFile(data: gifData, extension: "gif") {
-                    uris.append(uri)
-                    mimeTypes.append("image/gif")
-                }
-                continue
-            }
-
-            // Check for PNG using legacy API
-            let pngType = kUTTypePNG as String
-            if let dataArray = pasteboard.data(forPasteboardType: pngType, inItemSet: indexSet),
-               let pngData = dataArray.first {
-                if let uri = saveTempFile(data: pngData, extension: "png") {
-                    uris.append(uri)
-                    mimeTypes.append("image/png")
-                }
-                continue
-            }
-
-            // Check for JPEG using legacy API
-            let jpegType = kUTTypeJPEG as String
-            if let dataArray = pasteboard.data(forPasteboardType: jpegType, inItemSet: indexSet),
-               let jpegData = dataArray.first {
-                if let uri = saveTempFile(data: jpegData, extension: "jpg") {
-                    uris.append(uri)
-                    mimeTypes.append("image/jpeg")
-                }
-                continue
-            }
-
-            // Fallback: try to get image and convert to PNG
-            if let images = pasteboard.images, i < images.count {
-                let image = images[i]
-                if let pngData = image.pngData() {
-                    if let uri = saveTempFile(data: pngData, extension: "png") {
-                        uris.append(uri)
-                        mimeTypes.append("image/png")
-                    }
-                }
-            }
-        }
-
-        if !uris.isEmpty {
-            sendImageEvent(uris: uris, mimeTypes: mimeTypes)
-        } else {
-            sendUnsupportedEvent()
-        }
     }
 
     private func isValidGif(data: Data) -> Bool {
         guard data.count >= 6 else { return false }
         let header = data.prefix(6)
-        let gif87a: [UInt8] = [0x47, 0x49, 0x46, 0x38, 0x37, 0x61] // GIF87a
-        let gif89a: [UInt8] = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61] // GIF89a
+        let gif87a: [UInt8] = [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]
+        let gif89a: [UInt8] = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]
         return header.elementsEqual(gif87a) || header.elementsEqual(gif89a)
     }
 
-    private func saveTempFile(data: Data, extension ext: String) -> String? {
-        let tempDir = FileManager.default.temporaryDirectory
-        let fileName = "paste_\(Int(Date().timeIntervalSince1970 * 1000))_\(UUID().uuidString.prefix(8)).\(ext)"
-        let fileURL = tempDir.appendingPathComponent(fileName)
+    // MARK: - Paste Event Handling
 
+    static func handlePasteEvent() {
+        guard let instance = sharedInstance else { return }
+        instance.notifyPasteDetected()
+    }
+
+    private func notifyPasteDetected() {
         do {
-            try data.write(to: fileURL)
-            return fileURL.path
-        } catch {
-            print("FlutterPasteInput: Failed to save temp file: \(error)")
-            return nil
-        }
-    }
-
-    // MARK: - Event Sending
-
-    private func sendTextEvent(_ text: String) {
-        DispatchQueue.main.async { [weak self] in
-            self?.eventSink?([
-                "type": "text",
-                "value": text
-            ])
-        }
-    }
-
-    private func sendImageEvent(uris: [String], mimeTypes: [String]) {
-        DispatchQueue.main.async { [weak self] in
-            self?.eventSink?([
-                "type": "images",
-                "uris": uris,
-                "mimeTypes": mimeTypes
-            ])
-        }
-    }
-
-    private func sendUnsupportedEvent() {
-        DispatchQueue.main.async { [weak self] in
-            self?.eventSink?([
-                "type": "unsupported"
-            ])
-        }
-    }
-
-    // MARK: - Cleanup
-
-    private func clearTempFiles() {
-        let tempDir = FileManager.default.temporaryDirectory
-        do {
-            let files = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
-            for file in files where file.lastPathComponent.hasPrefix("paste_") {
-                try? FileManager.default.removeItem(at: file)
+            let content = try getClipboardContent()
+            flutterApi?.onPasteDetected(content: content) { result in
+                if case .failure(let error) = result {
+                    print("FlutterPasteInput: Failed to notify paste: \(error)")
+                }
             }
         } catch {
-            print("FlutterPasteInput: Failed to clear temp files: \(error)")
+            print("FlutterPasteInput: Error getting clipboard content: \(error)")
         }
     }
 
     // MARK: - Method Swizzling
 
     private static func swizzlePasteMethods() {
-        print("FlutterPasteInput: Swizzling methods")
         // Swizzle UITextField
         swizzlePaste(for: UITextField.self)
         swizzleCanPerformAction(for: UITextField.self)
@@ -355,12 +174,9 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
 
         // Swizzle FlutterTextInputView (used by Flutter for text input)
         if let flutterClass = NSClassFromString("FlutterTextInputView") {
-            print("FlutterPasteInput: Found FlutterTextInputView, swizzling")
             swizzlePaste(for: flutterClass)
             swizzleCanPerformAction(for: flutterClass)
             swizzlePasteConfiguration(for: flutterClass)
-        } else {
-            print("FlutterPasteInput: FlutterTextInputView not found")
         }
     }
 
@@ -373,7 +189,6 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
             return
         }
 
-        // Add the swizzled method to the target class
         let didAddMethod = class_addMethod(
             targetClass,
             swizzledSelector,
@@ -382,12 +197,10 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         )
 
         if didAddMethod {
-            // Get the newly added method and swap implementations
             if let newMethod = class_getInstanceMethod(targetClass, swizzledSelector) {
                 method_exchangeImplementations(originalMethod, newMethod)
             }
         } else {
-            // Method already exists, just swap
             method_exchangeImplementations(originalMethod, swizzledMethod)
         }
     }
@@ -447,7 +260,6 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
 
 extension UIResponder {
     @objc func flutterPasteInput_paste(_ sender: Any?) {
-        print("FlutterPasteInput: paste called on \(type(of: self))")
         // Notify Flutter about the paste event
         FlutterPasteInputPlugin.handlePasteEvent()
 
@@ -459,12 +271,9 @@ extension UIResponder {
         if action == #selector(UIResponder.paste(_:)) {
             let hasText = UIPasteboard.general.hasStrings
             let hasImages = UIPasteboard.general.hasImages
-            
-            print("FlutterPasteInput: canPerformAction paste - hasText: \(hasText), hasImages: \(hasImages)")
-            
+
             // Always enable paste if there's text or images
             if hasText || hasImages {
-                print("FlutterPasteInput: Enabling paste")
                 return true
             }
         }
@@ -473,7 +282,6 @@ extension UIResponder {
 
     @objc var flutterPasteInput_pasteConfiguration: UIPasteConfiguration? {
         get {
-            print("FlutterPasteInput: pasteConfiguration getter called on \(type(of: self))")
             // Create a paste configuration that accepts images
             if #available(iOS 11.0, *) {
                 let config = UIPasteConfiguration(acceptableTypeIdentifiers: [

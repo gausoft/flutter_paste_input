@@ -4,6 +4,8 @@
 /// paste content that can be intercepted by the plugin.
 library;
 
+import 'dart:typed_data';
+
 /// Represents the content pasted by the user.
 ///
 /// Use pattern matching to handle different paste types:
@@ -120,6 +122,55 @@ final class UnsupportedPaste extends PastePayload {
 
   @override
   String toString() => 'UnsupportedPaste()';
+}
+
+/// Represents a raw clipboard item with binary data.
+///
+/// This is used when the clipboard contains image data that needs
+/// to be processed by the Dart side.
+class RawClipboardItem {
+  /// Creates a [RawClipboardItem] with the given data and MIME type.
+  const RawClipboardItem({
+    required this.data,
+    required this.mimeType,
+  });
+
+  /// Raw binary data of the item.
+  final Uint8List data;
+
+  /// MIME type of the item (e.g., "image/png", "text/plain").
+  final String mimeType;
+
+  /// Returns true if this is an image item.
+  bool get isImage => mimeType.startsWith('image/');
+
+  /// Returns true if this is a text item.
+  bool get isText => mimeType.startsWith('text/');
+
+  /// Returns true if this is a GIF image.
+  bool get isGif => mimeType == 'image/gif';
+}
+
+/// Represents pasted image content with raw data.
+///
+/// Unlike [ImagePaste] which contains file URIs, this class contains
+/// the raw binary data of the images, allowing Flutter to handle
+/// storage and processing.
+final class RawImagePaste extends PastePayload {
+  /// Creates a [RawImagePaste] with the given items.
+  const RawImagePaste({required this.items});
+
+  /// List of raw clipboard items containing image data.
+  final List<RawClipboardItem> items;
+
+  /// The number of images.
+  int get count => items.length;
+
+  /// Returns true if any of the images is a GIF.
+  bool get hasGif => items.any((item) => item.isGif);
+
+  @override
+  String toString() => 'RawImagePaste(count: $count)';
 }
 
 /// Types of paste content that can be filtered.

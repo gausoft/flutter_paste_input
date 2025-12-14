@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_paste_input/flutter_paste_input.dart';
+import 'package:flutter_paste_input/widgets.dart';
 
 void main() {
   runApp(const MyApp());
@@ -37,14 +38,32 @@ class _ChatInputDemoState extends State<ChatInputDemo> {
     setState(() {
       switch (payload) {
         case TextPaste():
-          // Le texte est automatiquement inséré dans le TextField
+          // Text is automatically inserted into the TextField
           break;
         case ImagePaste(:final uris):
           _pastedImagePaths.addAll(uris);
+        case RawImagePaste(:final items):
+          // Handle raw image data - save to temp files for display
+          _saveRawImages(items);
         case UnsupportedPaste():
           break;
       }
     });
+  }
+
+  Future<void> _saveRawImages(List<RawClipboardItem> items) async {
+    for (final item in items) {
+      final extension = item.mimeType.split('/').last;
+      final fileName = 'paste_${DateTime.now().millisecondsSinceEpoch}.$extension';
+      final tempDir = Directory.systemTemp;
+      final file = File('${tempDir.path}/$fileName');
+      await file.writeAsBytes(item.data);
+      if (mounted) {
+        setState(() {
+          _pastedImagePaths.add(file.path);
+        });
+      }
+    }
   }
 
   void _removeImage(int index) {
@@ -194,31 +213,39 @@ class _ChatInputDemoState extends State<ChatInputDemo> {
   }
 
   Widget _buildImagePreview(int index) {
+    final imagePath = _pastedImagePaths[index];
+
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.file(
-            File(_pastedImagePaths[index]),
-            width: 80,
-            height: 80,
-            fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) {
-              final colorScheme = Theme.of(context).colorScheme;
-              return Container(
+        GestureDetector(
+          onTap: () => _openImageFullscreen(imagePath),
+          child: Hero(
+            tag: 'image_$imagePath',
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.file(
+                File(imagePath),
                 width: 80,
                 height: 80,
-                decoration: BoxDecoration(
-                  color: colorScheme.errorContainer,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(
-                  Icons.broken_image,
-                  color: colorScheme.onErrorContainer,
-                ),
-              );
-            },
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  final colorScheme = Theme.of(context).colorScheme;
+                  return Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      color: colorScheme.errorContainer,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(
+                      Icons.broken_image,
+                      color: colorScheme.onErrorContainer,
+                    ),
+                  );
+                },
+              ),
+            ),
           ),
         ),
         // Bouton X pour supprimer
@@ -243,6 +270,14 @@ class _ChatInputDemoState extends State<ChatInputDemo> {
           ),
         ),
       ],
+    );
+  }
+
+  void _openImageFullscreen(String imagePath) {
+    showImageViewer(
+      context: context,
+      imageFile: File(imagePath),
+      heroTag: 'image_$imagePath',
     );
   }
 }
