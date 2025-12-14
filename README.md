@@ -1,5 +1,10 @@
 # flutter_paste_input
 
+[![pub package](https://img.shields.io/pub/v/flutter_paste_input.svg)](https://pub.dev/packages/flutter_paste_input)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Flutter](https://img.shields.io/badge/Flutter-3.3.0+-02569B?logo=flutter)](https://flutter.dev)
+[![Platforms](https://img.shields.io/badge/Platforms-iOS%20%7C%20Android%20%7C%20macOS%20%7C%20Linux%20%7C%20Windows-green.svg)](#platform-support)
+
 A Flutter plugin for intercepting paste events in TextFields, supporting both text and image content across all platforms.
 
 ## Features
@@ -143,21 +148,26 @@ Sealed class representing paste content:
 ### PasteType
 
 Enum for filtering:
+
 - `PasteType.text`
 - `PasteType.image`
 
 ## How It Works
 
 ### iOS & macOS
+
 Uses Objective-C runtime method swizzling to intercept the `paste:` method on text input controls. When paste is detected, the clipboard content is processed and sent to Flutter via EventChannel.
 
 ### Android
+
 Uses Flutter's Actions system to intercept `PasteTextIntent`. When detected, the native plugin reads the clipboard content including images and sends events to Flutter.
 
 ### Linux
+
 Uses GTK's `GtkClipboard` API to read clipboard content, supporting both images and text.
 
 ### Windows
+
 Uses Win32 Clipboard API with GDI+ for image processing. Supports bitmap data, text, and file drops.
 
 ## Limitations

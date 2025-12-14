@@ -54,7 +54,8 @@ class _ChatInputDemoState extends State<ChatInputDemo> {
   Future<void> _saveRawImages(List<RawClipboardItem> items) async {
     for (final item in items) {
       final extension = item.mimeType.split('/').last;
-      final fileName = 'paste_${DateTime.now().millisecondsSinceEpoch}.$extension';
+      final fileName =
+          'paste_${DateTime.now().millisecondsSinceEpoch}.$extension';
       final tempDir = Directory.systemTemp;
       final file = File('${tempDir.path}/$fileName');
       await file.writeAsBytes(item.data);
@@ -130,7 +131,7 @@ class _ChatInputDemoState extends State<ChatInputDemo> {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             // Champ de saisie avec images
             Expanded(
