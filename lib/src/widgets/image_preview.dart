@@ -1,15 +1,29 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_paste_input/widgets.dart';
+
+import '../image_viewer.dart';
 
 /// A thumbnail preview of an image with a remove button.
+///
+/// Displays an image file as a thumbnail with a circular remove button
+/// in the top-right corner. Tapping the image opens it in fullscreen.
+///
+/// Example:
+/// ```dart
+/// ImagePreview(
+///   imagePath: '/path/to/image.png',
+///   onRemove: () => print('Remove tapped'),
+/// )
+/// ```
 class ImagePreview extends StatelessWidget {
+  /// Creates an image preview widget.
   const ImagePreview({
     super.key,
     required this.imagePath,
     required this.onRemove,
     this.size = 80,
+    this.borderRadius = 8,
   });
 
   /// The path to the image file.
@@ -20,6 +34,9 @@ class ImagePreview extends StatelessWidget {
 
   /// The size of the preview (width and height).
   final double size;
+
+  /// The border radius of the image corners.
+  final double borderRadius;
 
   void _openFullscreen(BuildContext context) {
     showImageViewer(context: context, imageFile: File(imagePath));
@@ -33,14 +50,14 @@ class ImagePreview extends StatelessWidget {
         GestureDetector(
           onTap: () => _openFullscreen(context),
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(borderRadius),
             child: Image.file(
               File(imagePath),
               width: size,
               height: size,
               fit: BoxFit.cover,
               errorBuilder: (context, error, stackTrace) {
-                return _ErrorPlaceholder(size: size);
+                return _ErrorPlaceholder(size: size, borderRadius: borderRadius);
               },
             ),
           ),
@@ -52,9 +69,10 @@ class ImagePreview extends StatelessWidget {
 }
 
 class _ErrorPlaceholder extends StatelessWidget {
-  const _ErrorPlaceholder({required this.size});
+  const _ErrorPlaceholder({required this.size, required this.borderRadius});
 
   final double size;
+  final double borderRadius;
 
   @override
   Widget build(BuildContext context) {
@@ -65,7 +83,7 @@ class _ErrorPlaceholder extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         color: colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(borderRadius),
       ),
       child: Icon(Icons.broken_image, color: colorScheme.onErrorContainer),
     );
