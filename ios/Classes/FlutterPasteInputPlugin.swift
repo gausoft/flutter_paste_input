@@ -65,26 +65,53 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
             result(nil)
         case "getClipboardImage":
             getClipboardImage(result: result)
+        case "getClipboardContent":
+            getClipboardContent(result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
     }
 
-    private func getClipboardImage(result: @escaping FlutterResult) {
+    /// Get clipboard content and return it to Flutter.
+    /// Returns a dictionary with:
+    /// - "hasText": Bool
+    /// - "hasImages": Bool
+    /// - "text": String? (if text is available)
+    /// - "images": [[String: Any]]? (if images are available)
+    private func getClipboardContent(result: @escaping FlutterResult) {
         let pasteboard = UIPasteboard.general
         
-        if !pasteboard.hasImages {
-            result(nil)
-            return
+        var response: [String: Any] = [:]
+        
+        // Check for text
+        let hasText = pasteboard.hasStrings
+        response["hasText"] = hasText
+        if hasText, let text = pasteboard.string {
+            response["text"] = text
         }
         
+        // Check for images
+        let hasImages = pasteboard.hasImages
+        response["hasImages"] = hasImages
+        
+        if hasImages {
+            let images = getImagesData(from: pasteboard)
+            if !images.isEmpty {
+                response["images"] = images
+            }
+        }
+        
+        result(response)
+    }
+    
+    /// Extract image data as byte arrays from pasteboard
+    private func getImagesData(from pasteboard: UIPasteboard) -> [[String: Any]] {
         var images: [[String: Any]] = []
         let itemCount = pasteboard.numberOfItems
         
         for i in 0..<itemCount {
             let indexSet = IndexSet(integer: i)
             
-            // Try to get image data for this item
             var imageData: Data?
             var mimeType: String?
             
@@ -119,6 +146,19 @@ public class FlutterPasteInputPlugin: NSObject, FlutterPlugin, FlutterStreamHand
                 ])
             }
         }
+        
+        return images
+    }
+
+    private func getClipboardImage(result: @escaping FlutterResult) {
+        let pasteboard = UIPasteboard.general
+        
+        if !pasteboard.hasImages {
+            result(nil)
+            return
+        }
+        
+        let images = getImagesData(from: pasteboard)
         
         if !images.isEmpty {
             result(["images": images])

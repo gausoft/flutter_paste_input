@@ -98,6 +98,15 @@ class PasteWrapper extends StatefulWidget {
 class _PasteWrapperState extends State<PasteWrapper> {
   bool get _useContentInsertion => Platform.isIOS || Platform.isAndroid;
 
+  // Store reference to the TextField controller for inserting text
+  TextEditingController? _getController() {
+    final child = widget.child;
+    if (child is TextField) {
+      return child.controller;
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!widget.enabled) {
@@ -170,7 +179,7 @@ class _PasteWrapperState extends State<PasteWrapper> {
         autofillHints: child.autofillHints,
         clipBehavior: child.clipBehavior,
         restorationId: child.restorationId,
-        scribbleEnabled: child.scribbleEnabled,
+        stylusHandwritingEnabled: child.stylusHandwritingEnabled,
         enableIMEPersonalizedLearning: child.enableIMEPersonalizedLearning,
         contextMenuBuilder: _buildContextMenu,
         canRequestFocus: child.canRequestFocus,
@@ -210,7 +219,7 @@ class _PasteWrapperState extends State<PasteWrapper> {
         label: 'Paste',
         onPressed: () async {
           ContextMenuController.removeAny();
-          await _checkAndPasteFromClipboard();
+          await _checkAndPasteFromClipboard(editableTextState);
         },
       ),
     );
@@ -221,56 +230,139 @@ class _PasteWrapperState extends State<PasteWrapper> {
     );
   }
 
-  Future<void> _checkAndPasteFromClipboard() async {
+  Future<void> _checkAndPasteFromClipboard(
+    EditableTextState editableTextState,
+  ) async {
     if (Platform.isIOS || Platform.isAndroid) {
-      // On mobile, try to read images from clipboard using platform channel
       try {
+        // Use getClipboardContent to get both text and images in one call
         final result = await MethodChannel(
           'dev.gausoft/flutter_paste_input/methods',
-        ).invokeMethod('getClipboardImage');
+        ).invokeMethod('getClipboardContent');
 
         if (result != null && result is Map) {
-          final imagesList = result['images'] as List?;
+          final hasImages = result['hasImages'] as bool? ?? false;
+          final hasText = result['hasText'] as bool? ?? false;
 
-          if (imagesList != null && imagesList.isNotEmpty) {
-            final List<String> uris = [];
-            final List<String> mimeTypes = [];
+          // Process images first (priority to images)
+          if (hasImages) {
+            final imagesList = result['images'] as List?;
+            if (imagesList != null && imagesList.isNotEmpty) {
+              final List<String> uris = [];
+              final List<String> mimeTypes = [];
 
-            final tempDir = await getTemporaryDirectory();
+              final tempDir = await getTemporaryDirectory();
 
-            for (var imageData in imagesList) {
-              if (imageData is Map) {
-                final data = imageData['data'] as Uint8List?;
-                final mimeType = imageData['mimeType'] as String?;
+              for (var imageData in imagesList) {
+                if (imageData is Map) {
+                  final data = imageData['data'] as Uint8List?;
+                  final mimeType = imageData['mimeType'] as String?;
 
-                if (data != null && mimeType != null) {
-                  final extension = _getExtensionFromMimeType(mimeType);
-                  final fileName =
-                      'paste_${DateTime.now().millisecondsSinceEpoch}_${uris.length}.$extension';
-                  final file = File('${tempDir.path}/$fileName');
+                  if (data != null && mimeType != null) {
+                    final extension = _getExtensionFromMimeType(mimeType);
+                    final fileName =
+                        'paste_${DateTime.now().millisecondsSinceEpoch}_${uris.length}.$extension';
+                    final file = File('${tempDir.path}/$fileName');
 
-                  await file.writeAsBytes(data);
-                  uris.add(file.path);
-                  mimeTypes.add(mimeType);
+                    await file.writeAsBytes(data);
+                    uris.add(file.path);
+                    mimeTypes.add(mimeType);
+                  }
                 }
               }
-            }
 
-            if (uris.isNotEmpty) {
-              _notifyImagePaste(uris, mimeTypes);
+              if (uris.isNotEmpty) {
+                _notifyImagePaste(uris, mimeTypes);
+                return;
+              }
+            }
+          }
+
+          // Process text if no images or images failed
+          if (hasText) {
+            final text = result['text'] as String?;
+            if (text != null && text.isNotEmpty) {
+              _notifyTextPaste(text);
+              // Actually insert the text into the TextField
+              _insertTextIntoField(editableTextState, text);
+              return;
             }
           }
         }
       } catch (e) {
-        print('FlutterPasteInput: Error reading clipboard image: $e');
+        // Error reading clipboard content, try fallback
+      }
+
+      // Fallback: try to paste text using Flutter's Clipboard
+      try {
+        final data = await Clipboard.getData(Clipboard.kTextPlain);
+        if (data?.text != null && data!.text!.isNotEmpty) {
+          _notifyTextPaste(data.text!);
+          // Actually insert the text into the TextField
+          _insertTextIntoField(editableTextState, data.text!);
+        }
+      } catch (e) {
+        // Error reading clipboard text
       }
     }
+  }
+
+  /// Insert text at the current cursor position in the TextField
+  void _insertTextIntoField(EditableTextState editableTextState, String text) {
+    final TextEditingValue currentValue = editableTextState.textEditingValue;
+    final int start = currentValue.selection.start;
+    final int end = currentValue.selection.end;
+
+    // Handle case where there's no valid selection
+    final int insertStart = start >= 0 ? start : currentValue.text.length;
+    final int insertEnd = end >= 0 ? end : currentValue.text.length;
+
+    final String newText = currentValue.text.replaceRange(
+      insertStart,
+      insertEnd,
+      text,
+    );
+    final int newCursorPosition = insertStart + text.length;
+
+    editableTextState.userUpdateTextEditingValue(
+      TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newCursorPosition),
+      ),
+      SelectionChangedCause.keyboard,
+    );
   }
 
   Widget _buildWithClipboardMonitoring() {
     return Actions(
       actions: <Type, Action<Intent>>{
-        PasteTextIntent: _PasteInterceptAction(_onClipboardPaste),
+        PasteTextIntent: _PasteInterceptAction(
+          onPaste: _onClipboardPaste,
+          onDefaultPaste: () {
+            // Get the default paste action and invoke it
+            final controller = _getController();
+            if (controller != null) {
+              Clipboard.getData(Clipboard.kTextPlain).then((data) {
+                if (data?.text != null) {
+                  final text = controller.text;
+                  final selection = controller.selection;
+                  final start = selection.start >= 0
+                      ? selection.start
+                      : text.length;
+                  final end = selection.end >= 0 ? selection.end : text.length;
+                  final newText = text.replaceRange(start, end, data!.text!);
+                  final newCursorPosition = start + data.text!.length;
+                  controller.value = TextEditingValue(
+                    text: newText,
+                    selection: TextSelection.collapsed(
+                      offset: newCursorPosition,
+                    ),
+                  );
+                }
+              });
+            }
+          },
+        ),
       },
       child: widget.child,
     );
@@ -309,7 +401,7 @@ class _PasteWrapperState extends State<PasteWrapper> {
         }
       }
     } catch (e) {
-      print('FlutterPasteInput: Error handling image content: $e');
+      // Error handling image content
       _notifyUnsupported();
     }
   }
@@ -334,7 +426,7 @@ class _PasteWrapperState extends State<PasteWrapper> {
         _notifyUnsupported();
       }
     } catch (e) {
-      print('FlutterPasteInput: Error reading clipboard: $e');
+      // Error reading clipboard
       _notifyUnsupported();
     }
   }
@@ -377,16 +469,19 @@ class _PasteWrapperState extends State<PasteWrapper> {
 }
 
 class _PasteInterceptAction extends Action<PasteTextIntent> {
-  _PasteInterceptAction(this.onPaste);
+  _PasteInterceptAction({required this.onPaste, required this.onDefaultPaste});
 
   final Future<void> Function() onPaste;
+  final void Function() onDefaultPaste;
 
   @override
   Object? invoke(PasteTextIntent intent) {
     onPaste();
+    // Also perform the actual paste into the text field
+    onDefaultPaste();
     return null;
   }
 
   @override
-  bool consumesKey(PasteTextIntent intent) => false;
+  bool consumesKey(PasteTextIntent intent) => true;
 }

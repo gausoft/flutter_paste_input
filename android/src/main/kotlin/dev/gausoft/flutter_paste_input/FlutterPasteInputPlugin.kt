@@ -77,6 +77,12 @@ class FlutterPasteInputPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
                 processClipboard()
                 result.success(null)
             }
+            "getClipboardImage" -> {
+                getClipboardImage(result)
+            }
+            "getClipboardContent" -> {
+                getClipboardContent(result)
+            }
             else -> {
                 result.notImplemented()
             }
@@ -271,6 +277,133 @@ class FlutterPasteInputPlugin : FlutterPlugin, MethodCallHandler, EventChannel.S
         return try {
             item.coerceToText(context)?.toString()
         } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Get clipboard content and return it to Flutter via result.
+     * Returns a map with:
+     * - "hasText": Boolean
+     * - "hasImages": Boolean
+     * - "text": String? (if text is available)
+     * - "images": List of maps with "data" and "mimeType" (if images are available)
+     */
+    private fun getClipboardContent(result: Result) {
+        val clipData = clipboardManager?.primaryClip
+        
+        if (clipData == null || clipData.itemCount == 0) {
+            result.success(mapOf(
+                "hasText" to false,
+                "hasImages" to false
+            ))
+            return
+        }
+
+        val response = mutableMapOf<String, Any?>()
+        
+        // Check for text
+        val text = getTextFromClipboard(clipData)
+        response["hasText"] = text != null
+        if (text != null) {
+            response["text"] = text
+        }
+
+        // Check for images
+        val hasImages = hasImages(clipData)
+        response["hasImages"] = hasImages
+        
+        if (hasImages) {
+            val images = getImagesData(clipData)
+            if (images.isNotEmpty()) {
+                response["images"] = images
+            }
+        }
+
+        result.success(response)
+    }
+
+    /**
+     * Get clipboard images as byte arrays.
+     */
+    private fun getClipboardImage(result: Result) {
+        val clipData = clipboardManager?.primaryClip
+        
+        if (clipData == null || clipData.itemCount == 0 || !hasImages(clipData)) {
+            result.success(null)
+            return
+        }
+
+        val images = getImagesData(clipData)
+        if (images.isNotEmpty()) {
+            result.success(mapOf("images" to images))
+        } else {
+            result.success(null)
+        }
+    }
+
+    /**
+     * Extract image data as byte arrays from clipboard.
+     */
+    private fun getImagesData(clipData: ClipData): List<Map<String, Any>> {
+        val images = mutableListOf<Map<String, Any>>()
+
+        for (i in 0 until clipData.itemCount) {
+            val item = clipData.getItemAt(i)
+            val uri = item.uri
+
+            if (uri != null) {
+                val mimeType = context.contentResolver.getType(uri)
+                if (mimeType != null && mimeType.startsWith("image/")) {
+                    val imageData = getImageBytes(uri, mimeType)
+                    if (imageData != null) {
+                        images.add(mapOf(
+                            "data" to imageData,
+                            "mimeType" to mimeType
+                        ))
+                    }
+                }
+            }
+        }
+
+        return images
+    }
+
+    /**
+     * Read image bytes from URI.
+     */
+    private fun getImageBytes(uri: Uri, mimeType: String): ByteArray? {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                if (mimeType == "image/gif") {
+                    // For GIFs, read raw bytes to preserve animation
+                    stream.readBytes()
+                } else {
+                    // For other images, decode and re-encode
+                    val bitmap = BitmapFactory.decodeStream(stream)
+                    if (bitmap != null) {
+                        val outputStream = ByteArrayOutputStream()
+                        val format = when (mimeType) {
+                            "image/jpeg" -> Bitmap.CompressFormat.JPEG
+                            "image/webp" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                Bitmap.CompressFormat.WEBP_LOSSLESS
+                            } else {
+                                @Suppress("DEPRECATION")
+                                Bitmap.CompressFormat.WEBP
+                            }
+                            else -> Bitmap.CompressFormat.PNG
+                        }
+                        bitmap.compress(format, 100, outputStream)
+                        bitmap.recycle()
+                        outputStream.toByteArray()
+                    } else {
+                        // Fallback: read raw bytes
+                        context.contentResolver.openInputStream(uri)?.readBytes()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read image bytes: ${e.message}")
             null
         }
     }

@@ -104,7 +104,6 @@ class _ChatInputDemoState extends State<ChatInputDemo> {
   }
 
   Widget _buildMessageInput() {
-    final colorScheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return SafeArea(

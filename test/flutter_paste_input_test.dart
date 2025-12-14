@@ -1,5 +1,5 @@
-import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_paste_input/flutter_paste_input.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('PastePayload', () {
@@ -52,9 +52,9 @@ void main() {
     });
 
     test('TextPaste equality', () {
-      const paste1 = TextPaste('Hello');
-      const paste2 = TextPaste('Hello');
-      const paste3 = TextPaste('World');
+      const paste1 = TextPaste(text: 'Hello');
+      const paste2 = TextPaste(text: 'Hello');
+      const paste3 = TextPaste(text: 'World');
 
       expect(paste1, equals(paste2));
       expect(paste1, isNot(equals(paste3)));
