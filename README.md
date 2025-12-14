@@ -7,6 +7,19 @@
 
 A Flutter plugin for intercepting paste events in TextFields, supporting both text and image content across all platforms.
 
+## Demo
+
+<table>
+  <tr>
+    <td align="center"><strong>iOS</strong></td>
+    <td align="center"><strong>macOS</strong></td>
+  </tr>
+  <tr>
+    <td><img src="https://raw.githubusercontent.com/gausoft/flutter_paste_input/main/screenshots/iphone-demo.gif" width="280" alt="iOS Demo"/></td>
+    <td><img src="https://raw.githubusercontent.com/gausoft/flutter_paste_input/main/screenshots/macos-demo.gif" width="500" alt="macOS Demo"/></td>
+  </tr>
+</table>
+
 ## Features
 
 - Detect when users paste content into a TextField
