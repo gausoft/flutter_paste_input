@@ -91,25 +91,162 @@ class _InputContainer extends StatelessWidget {
   }
 }
 
-class _ImageList extends StatelessWidget {
+class _ImageList extends StatefulWidget {
   const _ImageList({required this.imagePaths, required this.onRemoveImage});
 
   final List<String> imagePaths;
   final void Function(int index) onRemoveImage;
 
   @override
+  State<_ImageList> createState() => _ImageListState();
+}
+
+class _ImageListState extends State<_ImageList> {
+  final GlobalKey<AnimatedListState> _listKey = GlobalKey<AnimatedListState>();
+  late List<String> _internalList;
+  bool _isAnimatingRemoval = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _internalList = List.from(widget.imagePaths);
+  }
+
+  @override
+  void didUpdateWidget(_ImageList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Sync internal list with external list when new items are added
+    if (widget.imagePaths.length > _internalList.length &&
+        !_isAnimatingRemoval) {
+      // New items added - insert them with animation
+      for (int i = _internalList.length; i < widget.imagePaths.length; i++) {
+        _internalList.add(widget.imagePaths[i]);
+        _listKey.currentState?.insertItem(
+          i,
+          duration: const Duration(milliseconds: 150),
+        );
+      }
+    } else if (!_isAnimatingRemoval) {
+      // Direct sync for other cases
+      _internalList = List.from(widget.imagePaths);
+    }
+  }
+
+  void _removeItem(int index) {
+    if (_isAnimatingRemoval) return;
+
+    final isLastItem = _internalList.length == 1;
+    final removedPath = _internalList[index];
+
+    setState(() {
+      _isAnimatingRemoval = true;
+    });
+
+    _listKey.currentState?.removeItem(
+      index,
+      (context, animation) =>
+          _buildRemovedItem(removedPath, animation, index, isLastItem),
+      duration: const Duration(milliseconds: 200),
+    );
+
+    // Update internal list immediately
+    _internalList.removeAt(index);
+
+    // Notify parent after animation completes
+    Future.delayed(const Duration(milliseconds: 200), () {
+      if (mounted) {
+        setState(() {
+          _isAnimatingRemoval = false;
+        });
+        widget.onRemoveImage(index);
+      }
+    });
+  }
+
+  Widget _buildRemovedItem(
+    String imagePath,
+    Animation<double> animation,
+    int index,
+    bool isLastItem,
+  ) {
+    if (isLastItem) {
+      // Last item: slide down and disappear
+      return ClipRect(
+        child: SlideTransition(
+          position: Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1))
+              .animate(
+                CurvedAnimation(
+                  parent: ReverseAnimation(animation),
+                  curve: Curves.easeOut,
+                ),
+              ),
+          child: Padding(
+            padding: const EdgeInsets.only(right: 0),
+            child: ImagePreview(imagePath: imagePath, onRemove: () {}),
+          ),
+        ),
+      );
+    } else {
+      // Non-last items: item stays in place and fades out,
+      // while following elements slide left to replace it
+      return SizeTransition(
+        sizeFactor: CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeInOutCubic,
+        ),
+        axis: Axis.horizontal,
+        axisAlignment: -1.0, // Item stays left, space shrinks from right
+        child: FadeTransition(
+          opacity: CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOut,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ImagePreview(imagePath: imagePath, onRemove: () {}),
+          ),
+        ),
+      );
+    }
+  }
+
+  Widget _buildItem(
+    BuildContext context,
+    int index,
+    Animation<double> animation,
+  ) {
+    return ClipRect(
+      child: SizeTransition(
+        sizeFactor: CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+        ),
+        axis: Axis.horizontal,
+        axisAlignment: -1.0,
+        child: Padding(
+          padding: EdgeInsets.only(
+            right: index < _internalList.length - 1 ? 8 : 0,
+          ),
+          child: ImagePreview(
+            imagePath: _internalList[index],
+            onRemove: () => _removeItem(index),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: List.generate(
-          imagePaths.length,
-          (index) => ImagePreview(
-            imagePath: imagePaths[index],
-            onRemove: () => onRemoveImage(index),
-          ),
+      child: SizedBox(
+        height: 80,
+        child: AnimatedList(
+          key: _listKey,
+          scrollDirection: Axis.horizontal,
+          initialItemCount: _internalList.length,
+          itemBuilder: _buildItem,
         ),
       ),
     );
